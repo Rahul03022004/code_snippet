@@ -1,1146 +1,1853 @@
-# app.py — streamlit run app.py
 import streamlit as st
-import streamlit.components.v1 as components
-import os
+import sys, os, time, json, datetime
+sys.path.insert(0, os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..')))
 
-# Key is loaded from Streamlit secrets or .env — never hardcode here
-if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
-    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+from database.emotion_store import (
+    init_db, create_session, log_emotion,
+    get_emotion_timeline, get_session_emotions)
+from recommender.context_engine import ContextAwareRecommender
+from collections import Counter
+import plotly.graph_objects as go
+
+# ── Page Config ───────────────────────────────────────────────
 st.set_page_config(
-    page_title="Code Snippet Agent",
-    page_icon=None,
+    page_title="EmoSense — Emotion Intelligence",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ── Global CSS — white theme ──────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+init_db()
 
-#MainMenu, footer, header { visibility: hidden; }
-
-html, body, .stApp {
-    background-color: #F4F6FA !important;
-    font-family: 'Inter', sans-serif !important;
-    color: #0F1C2E !important;
+# ── Session State Init ────────────────────────────────────────
+defaults = {
+    'active_module':    'overview',
+    'user_name':        '',
+    'user_id':          None,
+    'all_sessions':     [],
+    'current_session':  None,
+    'permission_given': False,
 }
-
-/* ── Sidebar ── */
-[data-testid="stSidebar"] {
-    background-color: #FFFFFF !important;
-    border-right: 1px solid #E2E8F0 !important;
-    min-width: 280px !important;
-}
-[data-testid="stSidebar"] > div { padding: 0 !important; }
-
-/* ── Main area padding ── */
-[data-testid="stMainBlockContainer"] {
-    padding: 2rem 2.5rem 4rem !important;
-    max-width: 1100px !important;
-    background: #F4F6FA !important;
-}
-
-/* ── Text inputs ── */
-[data-testid="stTextInput"] input,
-[data-testid="stTextArea"] textarea {
-    background: #FFFFFF !important;
-    border: 1.5px solid #CBD5E1 !important;
-    border-radius: 10px !important;
-    color: #0F1C2E !important;
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.84rem !important;
-    padding: 11px 14px !important;
-    transition: border-color 0.2s, box-shadow 0.2s !important;
-}
-[data-testid="stTextInput"] input:focus,
-[data-testid="stTextArea"] textarea:focus {
-    border-color: #3D7EF5 !important;
-    box-shadow: 0 0 0 3px rgba(61,126,245,0.12) !important;
-    outline: none !important;
-}
-[data-testid="stTextInput"] input::placeholder,
-[data-testid="stTextArea"] textarea::placeholder { color: #94A3B8 !important; }
-[data-testid="stTextInput"] label,
-[data-testid="stTextArea"] label { display: none !important; }
-
-/* ── Primary button ── */
-[data-testid="stButton"] button {
-    background: #3D7EF5 !important;
-    color: #FFFFFF !important;
-    font-family: 'Inter', sans-serif !important;
-    font-weight: 600 !important;
-    font-size: 0.82rem !important;
-    border: none !important;
-    border-radius: 10px !important;
-    padding: 11px 20px !important;
-    width: 100% !important;
-    transition: all 0.2s !important;
-    box-shadow: 0 2px 8px rgba(61,126,245,0.25) !important;
-}
-[data-testid="stButton"] button:hover {
-    background: #2563EB !important;
-    transform: translateY(-1px) !important;
-    box-shadow: 0 6px 20px rgba(61,126,245,0.35) !important;
-}
-[data-testid="stButton"] button:disabled {
-    background: #CBD5E1 !important;
-    color: #94A3B8 !important;
-    box-shadow: none !important;
-    transform: none !important;
-}
-
-/* ── Shortcut / secondary buttons (inside columns) ── */
-div[data-testid="column"] [data-testid="stButton"] button {
-    background: #FFFFFF !important;
-    color: #475569 !important;
-    border: 1.5px solid #CBD5E1 !important;
-    font-size: 0.75rem !important;
-    font-weight: 500 !important;
-    box-shadow: none !important;
-}
-div[data-testid="column"] [data-testid="stButton"] button:hover {
-    border-color: #3D7EF5 !important;
-    color: #3D7EF5 !important;
-    background: #EFF6FF !important;
-    transform: none !important;
-}
-
-/* ── Download button ── */
-[data-testid="stDownloadButton"] button {
-    background: #F8FAFC !important;
-    color: #475569 !important;
-    border: 1.5px solid #CBD5E1 !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.78rem !important;
-    font-weight: 500 !important;
-    border-radius: 10px !important;
-    width: 100% !important;
-    box-shadow: none !important;
-}
-[data-testid="stDownloadButton"] button:hover {
-    border-color: #3D7EF5 !important;
-    color: #3D7EF5 !important;
-    background: #EFF6FF !important;
-}
-
-/* ── Progress bar ── */
-[data-testid="stProgressBar"] > div {
-    background: #E2E8F0 !important;
-    border-radius: 6px !important;
-    height: 5px !important;
-}
-[data-testid="stProgressBar"] > div > div {
-    background: linear-gradient(90deg, #3D7EF5, #22C797) !important;
-    border-radius: 6px !important;
-}
-
-/* ── Alerts ── */
-[data-testid="stAlert"] {
-    border-radius: 10px !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.82rem !important;
-}
-
-/* ── Code block ── */
-[data-testid="stCode"] {
-    border-radius: 12px !important;
-    border: 1px solid #E2E8F0 !important;
-    background: #F8FAFF !important;
-}
-pre { background: #F8FAFF !important; color: #0F1C2E !important; }
-
-/* ── Tabs ── */
-[data-baseweb="tab"] {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.8rem !important;
-    font-weight: 500 !important;
-    color: #64748B !important;
-}
-[aria-selected="true"] { color: #3D7EF5 !important; font-weight: 600 !important; }
-[data-baseweb="tab-list"] { border-bottom-color: #E2E8F0 !important; }
-
-/* ── Expander ── */
-[data-testid="stExpander"] summary {
-    background: #F8FAFC !important;
-    border: 1px solid #E2E8F0 !important;
-    border-radius: 10px !important;
-    color: #475569 !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.78rem !important;
-    font-weight: 500 !important;
-}
-
-/* ── Selectbox ── */
-[data-testid="stSidebar"] [data-baseweb="select"] > div {
-    background: #F8FAFC !important;
-    border: 1.5px solid #CBD5E1 !important;
-    border-radius: 8px !important;
-    color: #0F1C2E !important;
-    font-size: 0.82rem !important;
-}
-
-/* ── Spinner ── */
-[data-testid="stSpinner"] * { color: #3D7EF5 !important; }
-
-/* divider */
-hr { border-color: #E2E8F0 !important; margin: 20px 0 !important; }
-</style>
-""", unsafe_allow_html=True)
-
-# ── Imports ───────────────────────────────────────────────────
-from backend.rag.repo_loader      import load_repository
-from backend.agents.snippet_agent import generate_snippet
-
-# ── Session state ─────────────────────────────────────────────
-for k, v in [("repo_data", None), ("output", None),
-              ("logs", []), ("history", []),
-              ("pipeline_step", 0), ("active_module", "load")]:
+for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-repo_done   = st.session_state.repo_data is not None
-output_done = st.session_state.output    is not None
+# ── Emotion Meta ──────────────────────────────────────────────
+EMOTION_META = {
+    'happy':    {'color':'#F59E0B','light':'#FEF3C7','icon':'😊','text':'Happy'},
+    'sad':      {'color':'#3B82F6','light':'#DBEAFE','icon':'😢','text':'Sad'},
+    'angry':    {'color':'#EF4444','light':'#FEE2E2','icon':'😠','text':'Angry'},
+    'neutral':  {'color':'#6B7280','light':'#F3F4F6','icon':'😐','text':'Neutral'},
+    'fear':     {'color':'#8B5CF6','light':'#EDE9FE','icon':'😨','text':'Fear'},
+    'fearful':  {'color':'#8B5CF6','light':'#EDE9FE','icon':'😨','text':'Fearful'},
+    'surprise': {'color':'#06B6D4','light':'#CFFAFE','icon':'😲','text':'Surprise'},
+    'surprised':{'color':'#06B6D4','light':'#CFFAFE','icon':'😲','text':'Surprised'},
+    'disgust':  {'color':'#10B981','light':'#D1FAE5','icon':'🤢','text':'Disgust'},
+    'calm':     {'color':'#14B8A6','light':'#CCFBF1','icon':'😌','text':'Calm'},
+}
 
+def get_dominant(readings):
+    if not readings: return 'neutral'
+    return Counter(r['emotion'] for r in readings).most_common(1)[0][0]
 
-# ════════════════════════════════════════════════════════════
-# SIDEBAR — Separate module cards for each action
-# ════════════════════════════════════════════════════════════
-PIPELINE_STEPS = [
-    ("RAG Retrieval",    "Semantic search"),
-    ("Prompt Builder",   "Framework context"),
-    ("Ollama Generate",  "llama3.1 local"),
-    ("AST Validate",     "Syntax check"),
-    ("Smell Detector",   "Quality analysis"),
-    ("Quality Scorer",   "4-axis scoring"),
-]
+def get_avg_conf(readings):
+    if not readings: return 0
+    return sum(r['confidence'] for r in readings) / len(readings)
 
-def build_sidebar():
-    active_pipe = st.session_state.pipeline_step
-    active_mod  = st.session_state.active_module
+def clean_layout(fig, height=260):
+    fig.update_layout(
+        height=height,
+        margin=dict(l=0, r=0, t=20, b=0),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='DM Sans', color='#6B7280', size=11),
+        showlegend=False,
+    )
+    fig.update_xaxes(showgrid=True, gridcolor='#F3F4F6',
+                     zeroline=False,
+                     tickfont=dict(size=10, color='#9CA3AF'))
+    fig.update_yaxes(showgrid=True, gridcolor='#F3F4F6',
+                     zeroline=False,
+                     tickfont=dict(size=10, color='#9CA3AF'))
+    return fig
 
-    steps_html = ""
-    for i, (name, desc) in enumerate(PIPELINE_STEPS):
-        n = i + 1
-        if active_pipe == n:   state = "active"
-        elif output_done:      state = "done"
-        elif active_pipe > n:  state = "done"
-        else:                  state = "idle"
-
-        icon_html = ""
-        if state == "done":
-            icon_html = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#16A34A" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>'
-        elif state == "active":
-            icon_html = '<div class="spin-dot"></div>'
-        else:
-            icon_html = f'<span class="pipe-num">{n}</span>'
-
-        steps_html += f"""
-        <div class="pipe-row {state}">
-          <div class="pipe-icon">{icon_html}</div>
-          <div class="pipe-info">
-            <div class="pipe-name">{name}</div>
-            <div class="pipe-desc">{desc}</div>
-          </div>
-          {'<div class="pipe-active-label">RUNNING</div>' if state == "active" else ''}
-        </div>
-        {'<div class="pipe-connector ' + state + '"></div>' if n < 6 else ''}
-        """
-
-    # Module nav items
-    modules = [
-        ("load",     "01", "Load Repository",   "Clone + RAG index",      repo_done),
-        ("generate", "02", "Generate Snippet",  "Intent-driven code gen", repo_done),
-        ("history",  "03", "History",           "Past generations",       len(st.session_state.history) > 0),
-        ("settings", "04", "Settings",          "Model configuration",    True),
-    ]
-
-    nav_html = ""
-    for mod_id, num, title, desc, enabled in modules:
-        is_active = active_mod == mod_id
-        cls = "nav-active" if is_active else ("nav-disabled" if not enabled else "nav-item")
-        badge = f'<span class="nav-badge">{len(st.session_state.history)}</span>' if mod_id == "history" and st.session_state.history else ""
-        done_dot = '<span class="nav-done-dot"></span>' if (mod_id == "load" and repo_done) or (mod_id == "generate" and output_done) else ""
-        nav_html += f"""
-        <div class="{cls}" onclick="window.parent.postMessage({{type:'streamlit:setComponentValue', value:'{mod_id}'}}, '*')" data-mod="{mod_id}">
-          <div class="nav-num">{num}</div>
-          <div class="nav-text">
-            <div class="nav-title">{title} {done_dot} {badge}</div>
-            <div class="nav-desc">{desc}</div>
-          </div>
-          <svg class="nav-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
-        </div>
-        """
-
-    hist_html = ""
-    if st.session_state.history:
-        for h in reversed(st.session_state.history[-4:]):
-            tc = "#16A34A" if h["score"] >= 80 else "#D97706" if h["score"] >= 60 else "#DC2626"
-            hist_html += f"""
-            <div class="hist-row">
-              <div class="hist-top">
-                <span class="hist-fw">{h['framework'].upper()}</span>
-                <span class="hist-score" style="color:{tc};background:{tc}18">{h['score']}/100</span>
-              </div>
-              <div class="hist-intent">{h['intent'][:52]}...</div>
-            </div>"""
-    else:
-        hist_html = '<div class="hist-empty">No generations yet</div>'
-
-    components.html(f"""
-<!DOCTYPE html>
-<html>
-<head>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+# ── CSS ───────────────────────────────────────────────────────
+st.markdown("""
 <style>
-* {{ margin:0;padding:0;box-sizing:border-box; }}
-html,body {{ background:#FFFFFF;font-family:'Inter',sans-serif;overflow-x:hidden; }}
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
-.sidebar {{ padding:0;height:100%;display:flex;flex-direction:column; }}
+* { box-sizing: border-box; }
 
-/* ── Brand ── */
-.brand {{
-    padding:20px 20px 16px;
-    border-bottom:1px solid #F1F5F9;
-    display:flex;align-items:center;gap:10px;
-}}
-.brand-icon {{
-    width:36px;height:36px;border-radius:10px;
-    background:linear-gradient(135deg,#3D7EF5,#2050C8);
-    display:flex;align-items:center;justify-content:center;
-    flex-shrink:0;
-}}
-.brand-icon svg {{ width:18px;height:18px; }}
-.brand-name {{
-    font-size:0.95rem;font-weight:700;color:#0F1C2E;line-height:1.1;
-}}
-.brand-sub {{
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.58rem;color:#94A3B8;letter-spacing:0.08em;margin-top:2px;
-}}
-.brand-badge {{
-    margin-left:auto;
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.55rem;color:#16A34A;
-    background:#F0FDF4;border:1px solid #86EFAC;
-    border-radius:10px;padding:2px 8px;white-space:nowrap;
-}}
+.stApp {
+    background: #F8F7F4 !important;
+    font-family: 'DM Sans', sans-serif;
+}
 
-/* ── Section label ── */
-.sec-label {{
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.56rem;font-weight:600;
-    letter-spacing:0.18em;text-transform:uppercase;
-    color:#94A3B8;padding:16px 20px 8px;
-}}
+#MainMenu, footer { visibility: hidden; }
 
-/* ── Module nav cards ── */
-.nav-item, .nav-active, .nav-disabled {{
-    display:flex;align-items:center;gap:12px;
-    padding:10px 16px;margin:2px 8px;
-    border-radius:10px;cursor:pointer;
-    transition:all 0.15s;border:1.5px solid transparent;
-}}
-.nav-item {{ background:#FFFFFF; }}
-.nav-item:hover {{ background:#F0F7FF;border-color:#BFDBFE; }}
-.nav-active {{
-    background:#EFF6FF;border-color:#93C5FD;
-    box-shadow:0 1px 4px rgba(61,126,245,0.15);
-}}
-.nav-disabled {{ opacity:0.4;cursor:not-allowed; }}
+.block-container {
+    padding: 1.5rem 2rem 3rem 2rem !important;
+    max-width: 1400px !important;
+}
 
-.nav-num {{
-    width:28px;height:28px;border-radius:7px;flex-shrink:0;
-    display:flex;align-items:center;justify-content:center;
-    font-family:'JetBrains Mono',monospace;font-size:0.62rem;font-weight:600;
-    background:#F1F5F9;color:#64748B;
-    transition:all 0.15s;
-}}
-.nav-active .nav-num {{ background:#3D7EF5;color:#fff; }}
+[data-testid="stSidebar"] {
+    background: #1C1C1E !important;
+    border-right: none !important;
+}
 
-.nav-text {{ flex:1;min-width:0; }}
-.nav-title {{
-    font-size:0.8rem;font-weight:600;color:#1E293B;
-    display:flex;align-items:center;gap:5px;
-}}
-.nav-active .nav-title {{ color:#1D4ED8; }}
-.nav-disabled .nav-title {{ color:#94A3B8; }}
+.sidebar-logo {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.8rem;
+    color: #FFFFFF;
+    line-height: 1;
+    padding: 1.5rem 0 0.3rem 0;
+}
 
-.nav-desc {{ font-size:0.68rem;color:#94A3B8;margin-top:1px; }}
-.nav-active .nav-desc {{ color:#60A5FA; }}
+.sidebar-tagline {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.58rem;
+    color: rgba(255,255,255,0.3);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 1.2rem;
+    padding-bottom: 1.2rem;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
 
-.nav-arrow {{ color:#CBD5E1;flex-shrink:0;transition:color 0.15s; }}
-.nav-active .nav-arrow {{ color:#3D7EF5; }}
-.nav-item:hover .nav-arrow {{ color:#3D7EF5; }}
+.nav-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.58rem;
+    color: rgba(255,255,255,0.3);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin: 1rem 0 0.4rem 0;
+}
 
-.nav-done-dot {{
-    width:6px;height:6px;border-radius:50%;
-    background:#16A34A;display:inline-block;flex-shrink:0;
-}}
-.nav-badge {{
-    background:#3D7EF5;color:#fff;
-    font-size:0.55rem;font-weight:700;
-    padding:1px 6px;border-radius:10px;
-    font-family:'JetBrains Mono',monospace;
-}}
+.user-chip {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 0.8rem 1rem;
+    margin-bottom: 0.8rem;
+}
 
-/* ── Agent Pipeline ── */
-.pipe-list {{ padding:0 12px; }}
+.user-chip-name {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #FFFFFF;
+}
 
-.pipe-row {{
-    display:flex;align-items:center;gap:10px;
-    padding:8px 10px;border-radius:8px;
-    transition:all 0.3s;
-}}
-.pipe-row.idle   {{ opacity:0.35; }}
-.pipe-row.done   {{ opacity:0.75; }}
-.pipe-row.active {{
-    background:#EFF6FF;
-    border:1px solid #BFDBFE;
-    box-shadow:0 0 12px rgba(61,126,245,0.12);
-    animation:rowGlow 2s ease-in-out infinite;
-    opacity:1;
-}}
-@keyframes rowGlow {{
-    0%,100% {{ box-shadow:0 0 12px rgba(61,126,245,0.1); }}
-    50%      {{ box-shadow:0 0 20px rgba(61,126,245,0.22); }}
-}}
+.user-chip-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    color: rgba(255,255,255,0.35);
+    margin-top: 0.2rem;
+}
 
-.pipe-icon {{
-    width:26px;height:26px;border-radius:7px;flex-shrink:0;
-    display:flex;align-items:center;justify-content:center;
-    background:#F1F5F9;border:1px solid #E2E8F0;
-    transition:all 0.3s;
-}}
-.pipe-row.active .pipe-icon {{
-    background:#EFF6FF;border-color:#93C5FD;
-    box-shadow:0 0 8px rgba(61,126,245,0.3);
-}}
-.pipe-row.done .pipe-icon {{
-    background:#F0FDF4;border-color:#86EFAC;
-}}
+.page-hdr {
+    margin-bottom: 1.8rem;
+    padding-bottom: 1.2rem;
+    border-bottom: 2px solid #E5E5E7;
+}
 
-.pipe-num {{ font-family:'JetBrains Mono',monospace;font-size:0.6rem;color:#94A3B8; }}
-.spin-dot {{
-    width:8px;height:8px;border-radius:50%;background:#3D7EF5;
-    animation:dotPulse 1s ease-in-out infinite;
-}}
-@keyframes dotPulse {{
-    0%,100%{{transform:scale(1);opacity:1}}
-    50%{{transform:scale(1.5);opacity:0.6}}
-}}
+.page-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 2.2rem;
+    color: #1C1C1E;
+    line-height: 1.1;
+}
 
-.pipe-info {{ flex:1;min-width:0; }}
-.pipe-name {{ font-size:0.72rem;font-weight:600;color:#334155;transition:color 0.3s; }}
-.pipe-row.active .pipe-name {{ color:#1D4ED8; }}
-.pipe-row.done .pipe-name {{ color:#16A34A; }}
-.pipe-desc {{ font-family:'JetBrains Mono',monospace;font-size:0.56rem;color:#CBD5E1;margin-top:1px; }}
-.pipe-row.active .pipe-desc {{ color:#93C5FD; }}
+.page-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: #9CA3AF;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-top: 0.3rem;
+}
 
-.pipe-active-label {{
-    font-family:'JetBrains Mono',monospace;font-size:0.54rem;
-    color:#3D7EF5;letter-spacing:0.08em;flex-shrink:0;
-    animation:labelBlink 1.2s ease-in-out infinite;
-}}
-@keyframes labelBlink {{ 0%,100%{{opacity:1}}50%{{opacity:0.4}} }}
+.card {
+    background: #FFFFFF;
+    border-radius: 18px;
+    padding: 1.4rem;
+    border: 1px solid #E5E5E7;
+    margin-bottom: 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04),
+                0 4px 12px rgba(0,0,0,0.04);
+}
 
-.pipe-connector {{
-    width:1px;height:6px;background:#E2E8F0;
-    margin-left:23px;transition:background 0.4s;
-}}
-.pipe-connector.done   {{ background:#86EFAC; }}
-.pipe-connector.active {{ background:#93C5FD; }}
+.card-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.05rem;
+    color: #1C1C1E;
+    margin-bottom: 0.2rem;
+}
 
-/* ── History ── */
-.hist-section {{ padding:0 12px 12px; }}
-.hist-row {{
-    padding:8px 10px;margin-bottom:4px;
-    background:#F8FAFC;border:1px solid #F1F5F9;
-    border-radius:8px;
-}}
-.hist-top {{ display:flex;align-items:center;justify-content:space-between;margin-bottom:3px; }}
-.hist-fw {{
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.58rem;color:#94A3B8;letter-spacing:0.08em;
-}}
-.hist-score {{
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.62rem;font-weight:700;
-    padding:1px 8px;border-radius:10px;
-}}
-.hist-intent {{ font-size:0.7rem;color:#475569;line-height:1.4; }}
-.hist-empty {{
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.62rem;color:#CBD5E1;padding:8px 10px;
-}}
+.card-sub {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    color: #9CA3AF;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 0.8rem;
+}
 
-/* ── Status footer ── */
-.sidebar-footer {{
-    margin-top:auto;padding:14px 20px;
-    border-top:1px solid #F1F5F9;
-    display:flex;align-items:center;gap:8px;
-}}
-.footer-dot {{ width:7px;height:7px;border-radius:50%;background:#16A34A;flex-shrink:0;animation:fpulse 2s infinite; }}
-@keyframes fpulse {{ 0%,100%{{opacity:1}}50%{{opacity:0.4}} }}
-.footer-text {{ font-family:'JetBrains Mono',monospace;font-size:0.6rem;color:#94A3B8; }}
-.footer-text span {{ color:#3D7EF5;font-weight:600; }}
+.stat-tile {
+    background: white;
+    border-radius: 16px;
+    padding: 1.2rem 1.4rem;
+    border: 1px solid #E5E5E7;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
+
+.stat-tile-bar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    border-radius: 16px 16px 0 0;
+}
+
+.stat-val {
+    font-family: 'DM Serif Display', serif;
+    font-size: 2.2rem;
+    color: #1C1C1E;
+    line-height: 1;
+    margin: 0.3rem 0;
+}
+
+.stat-lbl {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    color: #9CA3AF;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+}
+
+.stat-icon { font-size: 1.3rem; margin-bottom: 0.3rem; }
+
+.hero-dark {
+    background: #1C1C1E;
+    border-radius: 22px;
+    padding: 2.2rem 2.8rem;
+    color: white;
+    position: relative;
+    overflow: hidden;
+    margin-bottom: 1.5rem;
+}
+
+.hero-dark::after {
+    content: '🧠';
+    position: absolute;
+    right: 2rem; top: 50%;
+    transform: translateY(-50%);
+    font-size: 5rem;
+    opacity: 0.1;
+}
+
+.hero-greeting {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    color: rgba(255,255,255,0.35);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-bottom: 0.4rem;
+}
+
+.hero-name {
+    font-family: 'DM Serif Display', serif;
+    font-size: 2.2rem;
+    color: white;
+    line-height: 1.1;
+}
+
+.hero-sub {
+    font-family: 'DM Sans', sans-serif;
+    color: rgba(255,255,255,0.45);
+    font-size: 0.88rem;
+    margin-top: 0.5rem;
+}
+
+.sess-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: white;
+    border: 1px solid #E5E5E7;
+    border-radius: 14px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.55rem;
+    transition: all 0.2s;
+}
+
+.sess-row:hover {
+    border-color: #1C1C1E;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+}
+
+.sess-num {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.3rem;
+    color: #D1D5DB;
+    width: 2rem;
+}
+
+.sess-title {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: #1C1C1E;
+}
+
+.sess-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6rem;
+    color: #9CA3AF;
+    margin-top: 0.1rem;
+}
+
+.emo-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.75rem;
+    border-radius: 50px;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 500;
+    font-size: 0.78rem;
+}
+
+.reco-card {
+    background: white;
+    border-radius: 14px;
+    padding: 1.1rem 1.3rem;
+    border: 1px solid #E5E5E7;
+    border-left: 4px solid #1C1C1E;
+    margin-bottom: 0.7rem;
+    transition: all 0.2s;
+}
+
+.reco-card:hover {
+    box-shadow: 0 4px 14px rgba(0,0,0,0.07);
+    transform: translateX(3px);
+}
+
+.reco-type {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-bottom: 0.25rem;
+    font-weight: 500;
+}
+
+.reco-title {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    color: #1C1C1E;
+    font-size: 0.92rem;
+    margin-bottom: 0.45rem;
+}
+
+.reco-item {
+    font-size: 0.8rem;
+    color: #6B7280;
+    padding: 0.18rem 0 0.18rem 1rem;
+    position: relative;
+}
+
+.reco-item::before {
+    content: '→';
+    position: absolute;
+    left: 0;
+    color: #D1D5DB;
+}
+
+.perm-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: #F8F7F4;
+    border: 1px solid #E5E5E7;
+    border-radius: 12px;
+    padding: 0.9rem 1.1rem;
+    margin: 0.5rem 0;
+}
+
+.perm-strong {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    color: #1C1C1E;
+    font-size: 0.88rem;
+}
+
+.perm-sub {
+    font-family: 'DM Sans', sans-serif;
+    color: #6B7280;
+    font-size: 0.78rem;
+    margin-top: 0.1rem;
+}
+
+.detect-box {
+    background: white;
+    border-radius: 22px;
+    padding: 2.5rem;
+    border: 1px solid #E5E5E7;
+    text-align: center;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+}
+
+.detect-timer {
+    font-family: 'DM Serif Display', serif;
+    font-size: 6rem;
+    color: #1C1C1E;
+    line-height: 1;
+}
+
+.detect-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: #9CA3AF;
+    margin-top: 0.5rem;
+}
+
+.dot-trail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin: 0.7rem 0;
+}
+
+.dot-e {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    border: 2px solid white;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    transition: transform 0.15s;
+    cursor: default;
+}
+
+.dot-e:hover { transform: scale(1.2); }
+
+.divider {
+    height: 1px;
+    background: #E5E5E7;
+    margin: 1.4rem 0;
+}
+
+.tip-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.8rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid #F3F4F6;
+}
+
+.tip-icon { font-size: 1.1rem; }
+
+.tip-title {
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: #1C1C1E;
+}
+
+.tip-desc {
+    font-size: 0.76rem;
+    color: #9CA3AF;
+    margin-top: 0.1rem;
+}
+
+.stButton > button {
+    font-family: 'DM Sans', sans-serif !important;
+    font-weight: 500 !important;
+    border-radius: 10px !important;
+    transition: all 0.2s !important;
+    border: 1.5px solid #E5E5E7 !important;
+    background: white !important;
+    color: #1C1C1E !important;
+    font-size: 0.85rem !important;
+    padding: 0.5rem 1rem !important;
+}
+
+.stButton > button:hover {
+    border-color: #1C1C1E !important;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
+    transform: translateY(-1px) !important;
+}
+
+.stSelectbox > div > div {
+    background: white !important;
+    border: 1.5px solid #E5E5E7 !important;
+    border-radius: 10px !important;
+}
+
+.stTextInput > div > div > input {
+    background: white !important;
+    border: 1.5px solid #E5E5E7 !important;
+    border-radius: 10px !important;
+}
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: #F3F4F6; }
+::-webkit-scrollbar-thumb {
+    background: #D1D5DB; border-radius: 3px;
+}
 </style>
-</head>
-<body>
-<div class="sidebar">
-
-  <!-- Brand -->
-  <div class="brand">
-    <div class="brand-icon">
-      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5">
-        <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
-      </svg>
-    </div>
-    <div>
-      <div class="brand-name">SnippetAgent</div>
-      <div class="brand-sub">AI CODE GENERATOR</div>
-    </div>
-    <div class="brand-badge">LIVE</div>
-  </div>
-
-  <!-- Modules -->
-  <div class="sec-label">Modules</div>
-  <div style="margin-bottom:4px">
-    {nav_html}
-  </div>
-
-  <!-- Agent Pipeline -->
-  <div class="sec-label">Agent Pipeline</div>
-  <div class="pipe-list">
-    {steps_html}
-  </div>
-
-  <!-- History -->
-  <div class="sec-label">Recent</div>
-  <div class="hist-section">
-    {hist_html}
-  </div>
-
-  <!-- Footer -->
-  <div class="sidebar-footer">
-    <div class="footer-dot"></div>
-    <div class="footer-text">Ollama &nbsp;·&nbsp; <span>{llm_model}</span> &nbsp;·&nbsp; LOCAL</div>
-  </div>
-
-</div>
-</body>
-</html>
-""", height=900, scrolling=True)
-
-
-# ════════════════════════════════════════════════════════════
-# HTML COMPONENTS — Main content
-# ════════════════════════════════════════════════════════════
-
-def render_header():
-    repo_done_   = st.session_state.repo_data is not None
-    output_done_ = st.session_state.output is not None
-    cur_step     = 4 if output_done_ else 2 if repo_done_ else 1
-
-    steps = [
-        ("01", "Load Repository", "Clone + RAG"),
-        ("02", "Generate",        "Intent-driven"),
-        ("03", "Validate",        "AST + Smells"),
-        ("04", "Review",          "Score + Export"),
-    ]
-    pills = ""
-    for i, (num, title, desc) in enumerate(steps):
-        s = i + 1
-        if s < cur_step:   cls = "done"
-        elif s == cur_step: cls = "active"
-        else:              cls = "idle"
-        icon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#16A34A" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' if cls == "done" else f'<span class="pnum">{num}</span>'
-        pills += f"""
-        <div class="pill {cls}">
-          <div class="pill-icon">{icon}</div>
-          <div>
-            <div class="pill-title">{title}</div>
-            <div class="pill-desc">{desc}</div>
-          </div>
-        </div>
-        {"<div class='pill-sep'><div class='pill-line'></div></div>" if i < 3 else ""}
-        """
-
-    st.markdown(f"""
-<style>
-@keyframes hdrFadeUp {{ from{{opacity:0;transform:translateY(10px)}} to{{opacity:1;transform:translateY(0)}} }}
-@keyframes livePulse {{ 0%,100%{{box-shadow:0 0 0 0 rgba(22,163,74,0.4)}} 50%{{box-shadow:0 0 0 6px rgba(22,163,74,0)}} }}
-
-.csa-hdr {{
-    background:#FFFFFF;
-    border:1px solid #E2E8F0;
-    border-radius:16px;
-    padding:32px 40px 28px;
-    margin-bottom:20px;
-    position:relative;overflow:hidden;
-    box-shadow:0 1px 4px rgba(0,0,0,0.06);
-}}
-.csa-hdr::before {{
-    content:'';position:absolute;top:0;left:0;right:0;height:3px;
-    background:linear-gradient(90deg,#3D7EF5 0%,#22C797 60%,#A78BFA 100%);
-}}
-.csa-hdr-badge {{
-    display:inline-flex;align-items:center;gap:7px;
-    background:#F0FDF4;border:1px solid #86EFAC;
-    border-radius:20px;padding:4px 14px;
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.64rem;color:#15803D;letter-spacing:0.08em;
-    margin-bottom:16px;animation:hdrFadeUp 0.4s ease both;
-}}
-.csa-live-dot {{
-    width:7px;height:7px;border-radius:50%;background:#16A34A;
-    animation:livePulse 2s ease-in-out infinite;display:inline-block;
-}}
-.csa-hdr-title {{
-    font-family:'Inter',sans-serif;
-    font-size:2.6rem;font-weight:700;
-    letter-spacing:-0.04em;line-height:1;
-    color:#0F1C2E;margin-bottom:10px;
-    animation:hdrFadeUp 0.4s ease 0.08s both;
-}}
-.csa-hdr-title .tb {{ color:#3D7EF5; }}
-.csa-hdr-title .tg {{ color:#22C797; }}
-.csa-hdr-sub {{
-    font-family:'JetBrains Mono',monospace;
-    font-size:0.68rem;color:#94A3B8;
-    letter-spacing:0.12em;text-transform:uppercase;
-    animation:hdrFadeUp 0.4s ease 0.16s both;
-}}
-.csa-hdr-sub span {{ color:#CBD5E1;margin:0 8px; }}
-.csa-stats {{
-    display:flex;gap:0;margin-top:24px;
-    border:1px solid #E2E8F0;border-radius:10px;
-    overflow:hidden;width:fit-content;background:#F8FAFC;
-    animation:hdrFadeUp 0.4s ease 0.24s both;
-}}
-.csa-stat {{
-    padding:11px 24px;border-right:1px solid #E2E8F0;
-    display:flex;flex-direction:column;gap:3px;
-}}
-.csa-stat:last-child {{ border-right:none; }}
-.csa-sv {{ font-size:1.4rem;font-weight:700;color:#0F1C2E;line-height:1; }}
-.csa-sv-b {{ color:#3D7EF5; }}
-.csa-sv-g {{ color:#22C797; }}
-.csa-sl {{ font-family:'JetBrains Mono',monospace;font-size:0.56rem;color:#94A3B8;letter-spacing:0.1em;text-transform:uppercase; }}
-
-/* Pipeline pills */
-.pill-row {{
-    display:flex;align-items:stretch;
-    background:#FFFFFF;border:1px solid #E2E8F0;
-    border-radius:12px;overflow:hidden;padding:4px;gap:3px;
-    margin-bottom:24px;
-    box-shadow:0 1px 3px rgba(0,0,0,0.05);
-}}
-.pill {{
-    flex:1;display:flex;align-items:center;gap:10px;
-    padding:11px 14px;border-radius:9px;
-    transition:all 0.3s;
-}}
-.pill.idle   {{ opacity:0.4; }}
-.pill.done   {{ background:#F0FDF4; }}
-.pill.active {{
-    background:#EFF6FF;
-    border:1px solid #BFDBFE;
-    box-shadow:0 2px 8px rgba(61,126,245,0.12);
-}}
-.pill-icon {{
-    width:30px;height:30px;flex-shrink:0;
-    border-radius:7px;display:flex;align-items:center;justify-content:center;
-    background:#F1F5F9;border:1px solid #E2E8F0;
-    transition:all 0.3s;
-}}
-.pill.active .pill-icon {{ background:#EFF6FF;border-color:#93C5FD; }}
-.pill.done   .pill-icon {{ background:#F0FDF4;border-color:#86EFAC; }}
-.pnum {{ font-family:'JetBrains Mono',monospace;font-size:0.62rem;color:#94A3B8; }}
-.pill.active .pnum {{ color:#3D7EF5; }}
-.pill-title {{ font-size:0.76rem;font-weight:600;color:#475569;line-height:1.2; }}
-.pill.active .pill-title {{ color:#1D4ED8; }}
-.pill.done   .pill-title {{ color:#15803D; }}
-.pill-desc {{ font-family:'JetBrains Mono',monospace;font-size:0.56rem;color:#CBD5E1;margin-top:1px; }}
-.pill.active .pill-desc {{ color:#93C5FD; }}
-.pill.done   .pill-desc {{ color:#86EFAC; }}
-.pill-sep {{ width:16px;flex-shrink:0;display:flex;align-items:center; }}
-.pill-line {{ width:100%;height:1px;background:#E2E8F0; }}
-</style>
-<div class="csa-hdr">
-  <div class="csa-hdr-badge"><span class="csa-live-dot"></span> OLLAMA &nbsp;·&nbsp; LLAMA3.1 &nbsp;·&nbsp; RUNS LOCALLY &nbsp;·&nbsp; FREE</div>
-  <div class="csa-hdr-title"><span class="tb">Code</span>Snippet<span class="tg">Agent</span></div>
-  <div class="csa-hdr-sub">RAG Retrieval <span>|</span> AST Validation <span>|</span> Smell Detection <span>|</span> Quality Scoring</div>
-  <div class="csa-stats">
-    <div class="csa-stat"><span class="csa-sv csa-sv-b">6</span><span class="csa-sl">Pipeline Steps</span></div>
-    <div class="csa-stat"><span class="csa-sv">100</span><span class="csa-sl">Quality Score</span></div>
-    <div class="csa-stat"><span class="csa-sv csa-sv-b">3x</span><span class="csa-sl">AST Retries</span></div>
-    <div class="csa-stat"><span class="csa-sv csa-sv-g">Free</span><span class="csa-sl">No API Key</span></div>
-  </div>
-</div>
-<div class="pill-row">{pills}</div>
 """, unsafe_allow_html=True)
 
 
-def render_module_card(icon_svg, title, subtitle, color="#3D7EF5"):
-    st.markdown(f"""
-<style>
-.mod-card {{
-    background:#FFFFFF;
-    border:1px solid #E2E8F0;
-    border-radius:14px;
-    padding:20px 24px 16px;
-    margin-bottom:16px;
-    box-shadow:0 1px 4px rgba(0,0,0,0.05);
-    position:relative;overflow:hidden;
-}}
-.mod-card::before {{
-    content:'';position:absolute;top:0;left:0;right:0;height:2px;
-    background:{color};
-}}
-.mod-card-head {{
-    display:flex;align-items:center;gap:12px;margin-bottom:14px;
-}}
-.mod-card-icon {{
-    width:38px;height:38px;border-radius:10px;flex-shrink:0;
-    display:flex;align-items:center;justify-content:center;
-    background:{color}18;border:1px solid {color}30;
-}}
-.mod-card-title {{ font-size:0.96rem;font-weight:700;color:#0F1C2E; }}
-.mod-card-sub   {{ font-size:0.72rem;color:#94A3B8;margin-top:2px;font-family:'JetBrains Mono',monospace; }}
-</style>
-<div class="mod-card">
-  <div class="mod-card-head">
-    <div class="mod-card-icon">{icon_svg}</div>
-    <div>
-      <div class="mod-card-title">{title}</div>
-      <div class="mod-card-sub">{subtitle}</div>
-    </div>
-  </div>
-""", unsafe_allow_html=True)
-
-
-def close_module_card():
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-def render_scores(score, smells, syntax_valid, context_used, framework):
-    axes = [
-        ("Syntax Valid",    score["Syntax Valid"],    25),
-        ("Smell Free",      score["Smell Free"],      25),
-        ("Context Aligned", score["Context Aligned"], 25),
-        ("Completeness",    score["Completeness"],    25),
-    ]
-    total = score["total"]
-
-    def col(v, mx):
-        r = v / mx
-        if r == 1.0: return "#16A34A","#F0FDF4","#86EFAC"
-        if r >= 0.6: return "#D97706","#FFFBEB","#FCD34D"
-        return "#DC2626","#FEF2F2","#FCA5A5"
-
-    cards = ""
-    for label, val, mx in axes:
-        c, bg, border = col(val, mx)
-        pct = int(val / mx * 100)
-        cards += f"""
-        <div class="sc" style="background:{bg};border-color:{border}">
-          <div class="sc-lbl">{label}</div>
-          <div class="sc-val" style="color:{c}">{val}<span class="sc-mx">/{mx}</span></div>
-          <div class="sc-bg"><div class="sc-bar" style="width:{pct}%;background:{c}"></div></div>
-        </div>"""
-
-    tc, tbg, tborder = col(total, 100)
-
-    meta = [
-        ("Syntax",    "Valid"    if syntax_valid  else "Error",   "#16A34A" if syntax_valid  else "#DC2626", "#F0FDF4" if syntax_valid else "#FEF2F2"),
-        ("Context",   "RAG Used" if context_used  else "No RAG",  "#16A34A" if context_used  else "#D97706", "#F0FDF4" if context_used else "#FFFBEB"),
-        ("Smells",    "None"     if not smells     else f"{len(smells)} Found", "#16A34A" if not smells else "#D97706", "#F0FDF4" if not smells else "#FFFBEB"),
-        ("Framework", framework.upper(), "#3D7EF5","#EFF6FF"),
-    ]
-    chips = "".join(f"""
-        <div class="chip" style="background:{bg};border-color:{c}30">
-          <span class="chip-l" style="color:{c}88">{l}</span>
-          <span class="chip-v" style="color:{c}">{v}</span>
-        </div>""" for l,v,c,bg in meta)
-
-    smell_html = ""
-    if smells:
-        tags = "".join(f'<span class="stag">{s}</span>' for s in smells)
-        smell_html = f"""
-        <div class="smell">
-          <div class="smell-title">Code Smells Detected</div>
-          <div class="smell-tags">{tags}</div>
-        </div>"""
-
-    st.markdown(f"""
-<style>
-@keyframes riseCard {{ from{{opacity:0;transform:translateY(10px)}} to{{opacity:1;transform:translateY(0)}} }}
-.meta-row {{ display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px; }}
-.chip {{
-    display:inline-flex;align-items:center;gap:6px;
-    border:1px solid;border-radius:20px;padding:4px 12px;font-size:0.72rem;
-}}
-.chip-l {{ font-weight:500; }}
-.chip-v {{ font-weight:700; }}
-
-.sc-grid {{ display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px; }}
-.sc {{
-    border:1px solid;border-radius:12px;padding:14px;
-    display:flex;flex-direction:column;gap:8px;
-    animation:riseCard 0.4s ease both;
-    box-shadow:0 1px 3px rgba(0,0,0,0.04);
-}}
-.sc:nth-child(1){{animation-delay:.04s}} .sc:nth-child(2){{animation-delay:.08s}}
-.sc:nth-child(3){{animation-delay:.12s}} .sc:nth-child(4){{animation-delay:.16s}}
-.sc-lbl {{ font-size:0.6rem;color:#64748B;letter-spacing:0.08em;text-transform:uppercase;font-weight:600; }}
-.sc-val {{ font-size:1.8rem;font-weight:700;line-height:1; }}
-.sc-mx  {{ font-size:0.78rem;color:#94A3B8; }}
-.sc-bg  {{ height:3px;background:#E2E8F0;border-radius:2px;overflow:hidden; }}
-.sc-bar {{ height:100%;border-radius:2px;transition:width 1s ease; }}
-
-.total {{
-    background:{tbg};border:1px solid {tborder};
-    border-radius:12px;padding:14px 20px;
-    display:flex;align-items:center;justify-content:space-between;
-    margin-bottom:12px;animation:riseCard 0.4s ease 0.2s both;
-    box-shadow:0 1px 3px rgba(0,0,0,0.04);
-}}
-.total-l {{ display:flex;flex-direction:column;gap:3px; }}
-.total-lbl {{ font-size:0.68rem;color:#64748B;text-transform:uppercase;letter-spacing:0.08em;font-weight:600; }}
-.total-sub {{ font-family:'JetBrains Mono',monospace;font-size:0.58rem;color:#94A3B8; }}
-.total-val {{ font-size:2.2rem;font-weight:700;color:{tc};line-height:1; }}
-.total-den {{ font-size:0.9rem;color:#94A3B8; }}
-
-.smell {{
-    background:#FFFBEB;border:1px solid #FCD34D;border-left:3px solid #D97706;
-    border-radius:10px;padding:12px 16px;margin-bottom:12px;
-    animation:riseCard 0.4s ease 0.24s both;
-}}
-.smell-title {{ font-size:0.68rem;font-weight:700;color:#D97706;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px; }}
-.smell-tags {{ display:flex;flex-wrap:wrap;gap:5px; }}
-.stag {{
-    font-family:'JetBrains Mono',monospace;font-size:0.6rem;
-    color:#D97706;background:#FEF9EE;
-    border:1px solid #FCD34D;border-radius:5px;padding:2px 8px;
-}}
-</style>
-<div class="meta-row">{chips}</div>
-<div class="sc-grid">{cards}</div>
-<div class="total">
-  <div class="total-l">
-    <div class="total-lbl">Overall Quality Score</div>
-    <div class="total-sub">4 axes &nbsp;·&nbsp; 25 pts each</div>
-  </div>
-  <div class="total-val">{total}<span class="total-den"> / 100</span></div>
-</div>
-{smell_html}
-""", unsafe_allow_html=True)
-
-
-# ════════════════════════════════════════════════════════════
-# SIDEBAR RENDER
-# ════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════
 with st.sidebar:
-    # Hidden selectboxes for config (controlled via sidebar HTML)
-    llm_model = st.selectbox("LLM", ["llama3-8b-8192","llama3-70b-8192","mixtral-8x7b-32768","gemma2-9b-it"],   label_visibility="collapsed")
-    embed_model = st.selectbox("Embed", ["nomic-embed-text","mxbai-embed-large"],                       label_visibility="collapsed")
-    os.environ["LLM_MODEL"]   = llm_model
-    os.environ["EMBED_MODEL"] = embed_model
 
-    build_sidebar()
+    st.markdown("""
+    <div class="sidebar-logo">EmoSense</div>
+    <div class="sidebar-tagline">
+        Emotion Intelligence System
+    </div>
+    """, unsafe_allow_html=True)
 
-    if st.session_state.history:
-        if st.button("Clear History", key="clrhist"):
-            st.session_state.history = []
+    if not st.session_state.user_name:
+        st.markdown(
+            '<div class="nav-label">Setup</div>',
+            unsafe_allow_html=True)
+        name = st.text_input(
+            "Name", placeholder="Your name...",
+            label_visibility="collapsed")
+        if st.button("Enter →") and name.strip():
+            st.session_state.user_name = name.strip()
+            st.session_state.user_id = (
+                name.strip().lower().replace(" ","_"))
+            st.rerun()
+        st.stop()
+
+    # User chip
+    total_s = len(st.session_state.all_sessions)
+    total_r = sum(len(s['readings'])
+                  for s in st.session_state.all_sessions)
+    st.markdown(f"""
+    <div class="user-chip">
+        <div class="user-chip-name">
+            👤 {st.session_state.user_name}
+        </div>
+        <div class="user-chip-sub">
+            {total_s} sessions · {total_r} readings
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Nav
+    st.markdown(
+        '<div class="nav-label">Modules</div>',
+        unsafe_allow_html=True)
+
+    MODULES = [
+        ("🏠", "overview",        "Overview"),
+        ("🎥", "detection",       "Detection"),
+        ("📊", "analytics",       "Daily Analytics"),
+        ("🎯", "recommendations", "Recommendations"),
+        ("📋", "sessions",        "All Sessions"),
+        ("⚙️", "settings",       "Settings"),
+    ]
+
+    for icon, key, label in MODULES:
+        if st.button(f"{icon}  {label}", key=f"nav_{key}"):
+            st.session_state.active_module = key
             st.rerun()
 
-
-# ════════════════════════════════════════════════════════════
-# MAIN CONTENT
-# ════════════════════════════════════════════════════════════
-render_header()
-
-
-# ════════════════════════════════════════════════════════════
-# MODULE 01 — LOAD REPOSITORY
-# ════════════════════════════════════════════════════════════
-repo_icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3D7EF5" stroke-width="2.5"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>'
-
-render_module_card(
-    repo_icon,
-    "Load Repository",
-    "Clone a GitHub repo and build the RAG index",
-    "#3D7EF5"
-)
-
-cu, cb = st.columns([5, 1])
-with cu:
-    github_url = st.text_input("url", placeholder="https://github.com/username/repository")
-with cb:
-    st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-    load_btn = st.button("Load Repository", use_container_width=True)
-
-st.markdown(
-    '<p style="font-family:JetBrains Mono,monospace;font-size:0.62rem;color:#94A3B8;'
-    'letter-spacing:0.1em;text-transform:uppercase;margin:10px 0 6px;font-weight:600">Quick Start</p>',
-    unsafe_allow_html=True
-)
-rc1, rc2, rc3 = st.columns(3)
-REPOS = [
-    ("vercel / next.js",    "https://github.com/vercel/next.js"),
-    ("tiangolo / fastapi",  "https://github.com/tiangolo/fastapi"),
-    ("expressjs / express", "https://github.com/expressjs/express"),
-]
-for col, (lbl, url) in zip([rc1, rc2, rc3], REPOS):
-    with col:
-        if st.button(lbl, key=f"r_{lbl}"):
-            github_url = url
-
-if load_btn and github_url and github_url.strip():
-    prog = st.progress(0, text="Initialising...")
-    sbox = st.empty()
-
-    def on_prog(done, total):
-        prog.progress(int(done / total * 100), text=f"Embedding  {done} / {total}  chunks")
-
-    sbox.info("Cloning repository and building RAG index...")
-    with st.spinner(""):
-        res = load_repository(github_url.strip(), on_prog)
-
-    if res["success"]:
-        st.session_state.repo_data    = {"repo_id": res["repo_id"], "framework": res["framework"]}
-        st.session_state.pipeline_step = 0
-        prog.progress(100, text="Complete")
-        sbox.success(f"Indexed {res['files_indexed']} chunks — Framework: {res['framework'].upper()} — ID: {res['repo_id']}")
-        st.rerun()
-    else:
-        prog.empty()
-        sbox.error(res["error"])
-
-if repo_done:
-    rd = st.session_state.repo_data
-    st.markdown(f"""
-<div style="display:flex;align-items:center;gap:14px;
-    background:#F0FDF4;border:1px solid #86EFAC;border-left:3px solid #16A34A;
-    border-radius:10px;padding:12px 16px;margin-top:10px;">
-  <div style="width:8px;height:8px;border-radius:50%;background:#16A34A;flex-shrink:0;"></div>
-  <span style="font-family:JetBrains Mono,monospace;font-size:0.74rem;color:#15803D;font-weight:700;letter-spacing:0.08em;">{rd['framework'].upper()}</span>
-  <span style="font-size:0.8rem;color:#166534;font-weight:500;">Repository loaded and indexed</span>
-  <span style="margin-left:auto;font-family:JetBrains Mono,monospace;font-size:0.62rem;color:#86EFAC;">ID: {rd['repo_id']}</span>
-</div>
-""", unsafe_allow_html=True)
-
-close_module_card()
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-
-# ════════════════════════════════════════════════════════════
-# MODULE 02 — GENERATE SNIPPET
-# ════════════════════════════════════════════════════════════
-gen_icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B5CF6" stroke-width="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>'
-
-render_module_card(
-    gen_icon,
-    "Generate Snippet",
-    "Describe your intent — agent matches your codebase style",
-    "#8B5CF6"
-)
-
-if not repo_done:
-    st.info("Load a repository in Module 01 to enable generation.")
-else:
-    INTENTS = [
-        "Generate a user authentication server action with email and password validation",
-        "Create a reusable Button component with loading state and size variants",
-        "Write a REST API endpoint for paginated product listing with filters",
-        "Generate a custom hook for fetching data with loading and error states",
-        "Create a middleware function for JWT token validation and refresh",
-        "Write a database connection utility with connection pooling",
-    ]
-
-    intent = st.text_area(
-        "intent",
-        placeholder="Describe the code you need in plain English...",
-        height=90
-    )
+    # Quick dominant
+    all_r = [r for s in st.session_state.all_sessions
+             for r in s['readings']]
+    if all_r:
+        dom  = get_dominant(all_r)
+        meta = EMOTION_META.get(dom, EMOTION_META['neutral'])
+        st.markdown(f"""
+        <div style="margin-top:1.5rem;
+             background:rgba(255,255,255,0.06);
+             border-radius:12px;padding:0.8rem 1rem;">
+            <div style="font-family:'JetBrains Mono',
+                 monospace;font-size:0.58rem;
+                 color:rgba(255,255,255,0.3);
+                 letter-spacing:0.15em;
+                 text-transform:uppercase;">
+                Overall Mood
+            </div>
+            <div style="font-family:'DM Serif Display',
+                 serif;font-size:1.3rem;
+                 color:white;margin-top:0.2rem;">
+                {meta['icon']} {meta['text']}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown(
-        '<p style="font-family:JetBrains Mono,monospace;font-size:0.62rem;color:#94A3B8;'
-        'letter-spacing:0.1em;text-transform:uppercase;margin:10px 0 6px;font-weight:600">Example Intents</p>',
-        unsafe_allow_html=True
-    )
-    ic1, ic2 = st.columns(2)
-    for i, ex in enumerate(INTENTS):
-        with [ic1, ic2][i % 2]:
-            short = ex[:54] + "..." if len(ex) > 54 else ex
-            if st.button(short, key=f"ie_{i}"):
-                intent = ex
-
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-    gen_btn = st.button(
-        "Generate Snippet",
-        disabled=not bool(intent and intent.strip()),
-        use_container_width=True,
-        key="gen_main"
-    )
-
-    if gen_btn and intent and intent.strip():
-        logs    = []
-        log_box = st.empty()
-        STEP_MAP = {
-            "Step 1": 1, "RAG": 1, "Step 2": 2, "Prompt": 2,
-            "Step 3": 3, "Generat": 3, "Ollama": 3,
-            "Step 4": 4, "AST": 4, "Syntax": 4,
-            "Step 5": 5, "Smell": 5, "Step 6": 6, "Scor": 6,
-        }
-
-        def log_fn(msg):
-            logs.append(msg)
-            log_box.code("\n".join(logs), language=None)
-            for kw, step in STEP_MAP.items():
-                if kw.lower() in msg.lower():
-                    st.session_state.pipeline_step = step
-                    break
-
-        st.session_state.pipeline_step = 1
-        result = None
-        with st.spinner("Agent pipeline running..."):
-            try:
-                result = generate_snippet(
-                    intent    = intent.strip(),
-                    framework = st.session_state.repo_data["framework"],
-                    repo_id   = st.session_state.repo_data["repo_id"],
-                    log       = log_fn
-                )
-            except KeyError as e:
-                log_box.empty()
-                st.session_state.pipeline_step = 0
-                st.error(
-                    f"Ollama returned an unexpected response format (missing key: {e}). "
-                    "Check that Ollama is running and the model is pulled. "
-                    "Try: `ollama pull llama3.1` in your terminal."
-                )
-                st.stop()
-            except Exception as e:
-                log_box.empty()
-                st.session_state.pipeline_step = 0
-                st.error(f"Agent pipeline failed: {e}")
-                st.stop()
-
-        log_box.empty()
-        st.session_state.pipeline_step = 0
-        st.session_state.output        = result
-        if result:
-            st.session_state.logs = logs
-            st.session_state.history.append({
-                "intent":    intent.strip(),
-                "framework": st.session_state.repo_data["framework"],
-                "score":     result["quality_score"]["total"],
-            })
+        '<div style="height:1rem"></div>',
+        unsafe_allow_html=True)
+    if st.button("↩ Switch User"):
+        for k in defaults:
+            st.session_state[k] = defaults[k]
         st.rerun()
 
-close_module_card()
-st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
+# ══════════════════════════════════════════════════════════════
+# MODULE 1 — OVERVIEW
+# ══════════════════════════════════════════════════════════════
+if st.session_state.active_module == 'overview':
 
-# ════════════════════════════════════════════════════════════
-# MODULE 03 — OUTPUT & REVIEW
-# ════════════════════════════════════════════════════════════
-if st.session_state.output:
-    out   = st.session_state.output
-    score = out["quality_score"]
+    sessions    = st.session_state.all_sessions
+    all_readings = [r for s in sessions for r in s['readings']]
 
-    review_icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#22C797" stroke-width="2.5"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>'
-    render_module_card(
-        review_icon,
-        "Review Output",
-        f"Quality score: {score['total']}/100  ·  Framework: {out['framework'].upper()}",
-        "#22C797"
-    )
+    hour = datetime.datetime.now().hour
+    greeting = ("Good morning" if hour < 12
+                else "Good afternoon" if hour < 17
+                else "Good evening")
 
-    render_scores(
-        score        = score,
-        smells       = out["smells_detected"],
-        syntax_valid = out["syntax_valid"],
-        context_used = out["context_used"],
-        framework    = out["framework"]
-    )
-
-    LANG = {"nextjs":"tsx","react":"tsx","express":"javascript",
-            "nestjs":"typescript","fastapi":"python","django":"python"}
-    lang = LANG.get(out["framework"], "javascript")
-    ext  = "py" if lang == "python" else "tsx"
-
-    if out.get("smell_fix"):
-        t1, t2 = st.tabs(["Generated", "Auto-Fixed"])
-        with t1:
-            st.code(out["snippet"], language=lang, line_numbers=True)
-        with t2:
-            st.success("Refactored — detected smells resolved.")
-            st.code(out["smell_fix"], language=lang, line_numbers=True)
+    if all_readings:
+        dom   = get_dominant(all_readings)
+        meta  = EMOTION_META.get(dom, EMOTION_META['neutral'])
+        h_sub = (f"Across {len(sessions)} sessions, "
+                 f"you've been mostly "
+                 f"{meta['icon']} {meta['text']}")
     else:
-        st.code(out["snippet"], language=lang, line_numbers=True)
+        h_sub = ("No sessions yet — go to Detection "
+                 "to record your first session")
 
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-    a1, a2, a3 = st.columns(3)
-    with a1:
-        st.download_button("Download Snippet", data=out["snippet"],
-                           file_name=f"snippet.{ext}", mime="text/plain",
-                           use_container_width=True)
-    with a2:
-        if out.get("smell_fix"):
-            st.download_button("Download Fixed", data=out["smell_fix"],
-                               file_name=f"snippet_fixed.{ext}", mime="text/plain",
-                               use_container_width=True)
-    with a3:
-        if st.button("Generate New", use_container_width=True, key="gen_new"):
-            st.session_state.output        = None
-            st.session_state.pipeline_step = 0
+    st.markdown(f"""
+    <div class="hero-dark">
+        <div class="hero-greeting">{greeting}</div>
+        <div class="hero-name">
+            {st.session_state.user_name}
+        </div>
+        <div class="hero-sub">{h_sub}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Stats
+    avg_c      = get_avg_conf(all_readings)
+    unique_emo = len(set(
+        r['emotion'] for r in all_readings))
+
+    c1, c2, c3, c4 = st.columns(4)
+    for col, icon, val, lbl, color in [
+        (c1,"🗓️",str(len(sessions)),
+         "Sessions","#1C1C1E"),
+        (c2,"📊",str(len(all_readings)),
+         "Total Readings","#3B82F6"),
+        (c3,"🎯",f"{avg_c*100:.0f}%",
+         "Avg Confidence","#10B981"),
+        (c4,"🌈",str(unique_emo),
+         "Emotions Seen","#F59E0B"),
+    ]:
+        with col:
+            st.markdown(f"""
+            <div class="stat-tile">
+                <div class="stat-tile-bar"
+                     style="background:{color}">
+                </div>
+                <div class="stat-icon">{icon}</div>
+                <div class="stat-val">{val}</div>
+                <div class="stat-lbl">{lbl}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="divider"></div>',
+        unsafe_allow_html=True)
+
+    if sessions and all_readings:
+        cl, cr = st.columns([1.3, 1])
+
+        with cl:
+            st.markdown("""
+            <div class="card-title">
+                Emotion Distribution
+            </div>
+            <div class="card-sub">
+                All sessions combined
+            </div>
+            """, unsafe_allow_html=True)
+
+            counts = Counter(
+                r['emotion'] for r in all_readings)
+            emos   = list(counts.keys())
+            vals   = list(counts.values())
+            colors = [EMOTION_META.get(
+                e, EMOTION_META['neutral'])['color']
+                for e in emos]
+            lights = [EMOTION_META.get(
+                e, EMOTION_META['neutral'])['light']
+                for e in emos]
+
+            fig = go.Figure(go.Bar(
+                x=vals, y=emos, orientation='h',
+                marker=dict(
+                    color=lights,
+                    line=dict(color=colors, width=2)),
+                text=vals, textposition='outside',
+                textfont=dict(
+                    family='DM Sans', size=11,
+                    color='#6B7280'),
+            ))
+            clean_layout(fig, 280)
+            fig.update_yaxes(showgrid=False)
+            st.plotly_chart(
+                fig, use_container_width=True,
+                config={'displayModeBar': False})
+
+        with cr:
+            st.markdown("""
+            <div class="card-title">Recent Sessions</div>
+            <div class="card-sub">Latest activity</div>
+            """, unsafe_allow_html=True)
+
+            for i, s in enumerate(
+                    reversed(sessions[-5:])):
+                n    = len(sessions) - i
+                dom  = get_dominant(s['readings'])
+                meta = EMOTION_META.get(
+                    dom, EMOTION_META['neutral'])
+                conf = get_avg_conf(s['readings'])
+                st.markdown(f"""
+                <div class="sess-row">
+                    <div style="display:flex;
+                         align-items:center;gap:0.8rem;">
+                        <div class="sess-num">
+                            {n:02d}
+                        </div>
+                        <div>
+                            <div class="sess-title">
+                                {s['label']}
+                            </div>
+                            <div class="sess-meta">
+                                {len(s['readings'])} readings ·
+                                {conf*100:.0f}% conf ·
+                                {s['timestamp']}
+                            </div>
+                        </div>
+                    </div>
+                    <span class="emo-pill"
+                        style="background:{meta['light']};
+                               color:{meta['color']}">
+                        {meta['icon']} {meta['text']}
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
+
+        if len(sessions) >= 2:
+            st.markdown(
+                '<div class="divider"></div>',
+                unsafe_allow_html=True)
+            st.markdown("""
+            <div class="card-title">
+                Confidence Across Sessions
+            </div>
+            <div class="card-sub">
+                Detection reliability per session
+            </div>
+            """, unsafe_allow_html=True)
+
+            x  = [f"S{i+1}" for i in range(len(sessions))]
+            yc = [get_avg_conf(s['readings'])*100
+                  for s in sessions]
+            sc = [EMOTION_META.get(
+                get_dominant(s['readings']),
+                EMOTION_META['neutral'])['color']
+                for s in sessions]
+
+            fig3 = go.Figure()
+            fig3.add_trace(go.Scatter(
+                x=x, y=yc,
+                mode='lines+markers',
+                line=dict(color='#1C1C1E', width=2.5),
+                marker=dict(
+                    size=9, color=sc,
+                    line=dict(color='white', width=2)),
+                fill='tozeroy',
+                fillcolor='rgba(28,28,30,0.05)',
+            ))
+            clean_layout(fig3, 180)
+            fig3.update_yaxes(
+                range=[0,105],
+                title_text="Confidence %")
+            st.plotly_chart(
+                fig3, use_container_width=True,
+                config={'displayModeBar': False})
+
+    else:
+        st.markdown("""
+        <div class="card" style="text-align:center;
+             padding:3rem 2rem;">
+            <div style="font-size:3rem;
+                 margin-bottom:1rem;">📭</div>
+            <div class="card-title">
+                No sessions recorded yet
+            </div>
+            <div style="color:#9CA3AF;font-size:0.88rem;
+                 margin-top:0.5rem;">
+                Go to <strong>Detection</strong> to record
+                your first 30-second session
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("→ Start Detection"):
+            st.session_state.active_module = 'detection'
             st.rerun()
 
-    if st.session_state.logs:
-        with st.expander("Agent Execution Log"):
-            st.code("\n".join(st.session_state.logs), language=None)
 
-    close_module_card()
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════
+# MODULE 2 — DETECTION
+# ══════════════════════════════════════════════════════════════
+elif st.session_state.active_module == 'detection':
+
+    st.markdown("""
+    <div class="page-hdr">
+        <div class="page-title">Detection</div>
+        <div class="page-sub">
+            30-second multimodal emotion recording
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    sessions = st.session_state.all_sessions
+    n_sess   = len(sessions)
+
+    cl, cr = st.columns([1.4, 1])
+
+    with cl:
+        if not st.session_state.permission_given:
+            st.markdown("""
+            <div class="detect-box">
+                <div style="font-size:2.5rem;
+                     margin-bottom:0.8rem">🔐</div>
+                <div style="font-family:'DM Serif Display',
+                     serif;font-size:1.7rem;
+                     color:#1C1C1E;margin-bottom:0.5rem;">
+                    Permission Required
+                </div>
+                <div style="color:#6B7280;font-size:0.88rem;
+                     margin-bottom:1.5rem;
+                     max-width:360px;margin-left:auto;
+                     margin-right:auto;line-height:1.6;">
+                    EmoSense needs camera and microphone
+                    access to detect emotions during the
+                    30-second session.
+                </div>
+            """, unsafe_allow_html=True)
+
+            for icon, strong, sub in [
+                ("📷","Camera Access",
+                 "Facial expression analysis"),
+                ("🎤","Microphone Access",
+                 "Voice emotion detection"),
+                ("🔒","Local Only",
+                 "Data never leaves your device"),
+            ]:
+                st.markdown(f"""
+                <div class="perm-row">
+                    <span style="font-size:1.4rem">
+                        {icon}
+                    </span>
+                    <div>
+                        <div class="perm-strong">
+                            {strong}
+                        </div>
+                        <div class="perm-sub">{sub}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown(
+                '<div style="height:0.8rem"></div>',
+                unsafe_allow_html=True)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(
+                        "✓ Grant Permission",
+                        use_container_width=True):
+                    st.session_state.permission_given = True
+                    st.rerun()
+            with c2:
+                if st.button(
+                        "✕ Deny",
+                        use_container_width=True):
+                    st.warning("Camera & mic required.")
+
+        else:
+            st.markdown(f"""
+            <div class="detect-box">
+                <div style="font-family:'JetBrains Mono',
+                     monospace;font-size:0.65rem;
+                     color:#9CA3AF;letter-spacing:0.2em;
+                     text-transform:uppercase;
+                     margin-bottom:0.8rem;">
+                    Session {n_sess + 1} Ready
+                </div>
+                <div class="detect-timer">30</div>
+                <div class="detect-status">
+                    seconds · face + voice detection
+                </div>
+                <div style="background:#F3F4F6;
+                     border-radius:50px;height:5px;
+                     margin:1.2rem 0;">
+                    <div style="width:100%;height:100%;
+                         background:#1C1C1E;
+                         border-radius:50px;">
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown(
+                '<div style="height:0.8rem"></div>',
+                unsafe_allow_html=True)
+
+            if st.button(
+                    f"▶  Start Session {n_sess+1}  "
+                    f"(30 seconds)",
+                    use_container_width=True):
+
+                with st.spinner(
+                        "Loading AI models..."):
+                    from inference.realtime_pipeline \
+                        import RealtimePipeline
+                    pipeline = RealtimePipeline()
+
+                new_sid = create_session(
+                    st.session_state.user_id
+                    or 'default')
+
+                status = st.empty()
+                status.info(
+                    "✅ Ready! Webcam window opening... "
+                    "Look at the camera naturally.")
+                time.sleep(1)
+
+                with st.spinner(
+                        "🎥 Recording... "
+                        "Watch the webcam window!"):
+                    readings = (
+                        pipeline.run_timed_session(
+                            duration=30,
+                            session_id=new_sid))
+
+                if readings:
+                    dom  = get_dominant(readings)
+                    meta = EMOTION_META.get(
+                        dom, EMOTION_META['neutral'])
+
+                    st.session_state.all_sessions\
+                        .append({
+                        'session_id': new_sid,
+                        'label':      f"Session {n_sess+1}",
+                        'readings':   readings,
+                        'timestamp':  (
+                            datetime.datetime.now()
+                            .strftime("%H:%M")),
+                        'dominant':   dom,
+                    })
+
+                    status.success(
+                        f"✅ Session {n_sess+1} complete! "
+                        f"{len(readings)} readings · "
+                        f"Dominant: "
+                        f"{meta['icon']} {meta['text']}")
+                    st.balloons()
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    status.error(
+                        "❌ No face detected. Check "
+                        "lighting and try again.")
+
+    with cr:
+        st.markdown("""
+        <div class="card-title">Recorded Sessions</div>
+        <div class="card-sub">This run</div>
+        """, unsafe_allow_html=True)
+
+        if sessions:
+            for i, s in enumerate(sessions):
+                dom  = get_dominant(s['readings'])
+                meta = EMOTION_META.get(
+                    dom, EMOTION_META['neutral'])
+                conf = get_avg_conf(s['readings'])
+                st.markdown(f"""
+                <div class="sess-row">
+                    <div style="display:flex;
+                         align-items:center;gap:0.8rem;">
+                        <div class="sess-num">
+                            {i+1:02d}
+                        </div>
+                        <div>
+                            <div class="sess-title">
+                                {s['label']}
+                            </div>
+                            <div class="sess-meta">
+                                {len(s['readings'])} readings ·
+                                {conf*100:.0f}% ·
+                                {s['timestamp']}
+                            </div>
+                        </div>
+                    </div>
+                    <span class="emo-pill"
+                        style="background:{meta['light']};
+                               color:{meta['color']}">
+                        {meta['icon']} {meta['text']}
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="text-align:center;padding:2rem;
+                 color:#9CA3AF;font-size:0.85rem;">
+                No sessions yet.<br>
+                Start your first above.
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown(
+            '<div class="divider"></div>',
+            unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="card-title">Recording Tips</div>
+        """, unsafe_allow_html=True)
+
+        for icon, title, desc in [
+            ("💡","Good Lighting",
+             "Face a light source"),
+            ("📏","Distance",
+             "30–60 cm from camera"),
+            ("🎭","Be Natural",
+             "Don't pose, just be yourself"),
+            ("🔇","Quiet Space",
+             "Reduce background noise"),
+            ("⏱️","Multiple Sessions",
+             "3+ sessions = better insights"),
+        ]:
+            st.markdown(f"""
+            <div class="tip-row">
+                <span class="tip-icon">{icon}</span>
+                <div>
+                    <div class="tip-title">{title}</div>
+                    <div class="tip-desc">{desc}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 
-# ════════════════════════════════════════════════════════════
-# MODULE 04 — SETTINGS
-# ════════════════════════════════════════════════════════════
-settings_icon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F59E0B" stroke-width="2.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>'
+# ══════════════════════════════════════════════════════════════
+# MODULE 3 — ANALYTICS
+# ══════════════════════════════════════════════════════════════
+elif st.session_state.active_module == 'analytics':
 
-render_module_card(settings_icon, "Settings", "Model configuration and system parameters", "#F59E0B")
+    st.markdown("""
+    <div class="page-hdr">
+        <div class="page-title">Daily Analytics</div>
+        <div class="page-sub">
+            Emotion patterns and trend analysis
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-sc1, sc2 = st.columns(2)
-with sc1:
-    st.markdown('<p style="font-size:0.72rem;font-weight:600;color:#64748B;margin-bottom:5px;">LLM Model</p>', unsafe_allow_html=True)
-    st.markdown(f'<div style="background:#F8FAFC;border:1.5px solid #E2E8F0;border-radius:8px;padding:9px 14px;font-family:JetBrains Mono,monospace;font-size:0.82rem;color:#0F1C2E;font-weight:600;">{llm_model}</div>', unsafe_allow_html=True)
-with sc2:
-    st.markdown('<p style="font-size:0.72rem;font-weight:600;color:#64748B;margin-bottom:5px;">Embed Model</p>', unsafe_allow_html=True)
-    st.markdown(f'<div style="background:#F8FAFC;border:1.5px solid #E2E8F0;border-radius:8px;padding:9px 14px;font-family:JetBrains Mono,monospace;font-size:0.82rem;color:#0F1C2E;font-weight:600;">{embed_model}</div>', unsafe_allow_html=True)
+    sessions    = st.session_state.all_sessions
+    all_readings = [r for s in sessions
+                    for r in s['readings']]
 
-st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    if not all_readings:
+        st.markdown("""
+        <div class="card" style="text-align:center;
+             padding:3rem;">
+            <div style="font-size:3rem">📊</div>
+            <div class="card-title"
+                 style="margin-top:1rem;">
+                No data to analyze
+            </div>
+            <div style="color:#9CA3AF;margin-top:0.5rem;">
+                Complete at least one detection session
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
 
-cfg_data = [
-    ("Chunk Size",       "500 characters"),
-    ("Chunk Overlap",    "100 characters"),
-    ("Embedding Dims",   "768 (nomic-embed-text)"),
-    ("Top-K Retrieval",  "3 chunks"),
-    ("Temperature",      "0.3 (deterministic)"),
-    ("Max Tokens",       "800 per generation"),
-    ("AST Retries",      "3 attempts max"),
-    ("Smell Checks",     "Long method, duplicate, dead code, God class"),
-]
+    counts  = Counter(r['emotion'] for r in all_readings)
+    dom     = counts.most_common(1)[0][0]
+    d_meta  = EMOTION_META.get(dom, EMOTION_META['neutral'])
+    avg_c   = get_avg_conf(all_readings)
 
-config_html = "".join(f"""
-<div style="display:flex;align-items:center;padding:8px 0;border-bottom:1px solid #F1F5F9;">
-  <span style="font-size:0.76rem;font-weight:600;color:#475569;width:160px;flex-shrink:0;">{k}</span>
-  <span style="font-family:JetBrains Mono,monospace;font-size:0.74rem;color:#3D7EF5;font-weight:600;">{v}</span>
-</div>""" for k, v in cfg_data)
+    # Stats
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f"""
+        <div class="stat-tile">
+            <div class="stat-tile-bar"
+                 style="background:{d_meta['color']}">
+            </div>
+            <div style="font-size:2rem">
+                {d_meta['icon']}
+            </div>
+            <div class="stat-val">{d_meta['text']}</div>
+            <div class="stat-lbl">Dominant Emotion</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div class="stat-tile">
+            <div class="stat-tile-bar"
+                 style="background:#3B82F6"></div>
+            <div style="font-size:2rem">📈</div>
+            <div class="stat-val">
+                {avg_c*100:.1f}%
+            </div>
+            <div class="stat-lbl">Avg Confidence</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""
+        <div class="stat-tile">
+            <div class="stat-tile-bar"
+                 style="background:#10B981"></div>
+            <div style="font-size:2rem">🎬</div>
+            <div class="stat-val">{len(sessions)}</div>
+            <div class="stat-lbl">Total Sessions</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-st.markdown(f'<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:4px 14px 4px;margin-top:4px;">{config_html}</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="divider"></div>',
+        unsafe_allow_html=True)
 
-close_module_card()
+    # Charts row
+    ca, cb = st.columns(2)
+    emos   = list(counts.keys())
+    vals   = list(counts.values())
+    pcts   = [v/sum(vals)*100 for v in vals]
+    colors = [EMOTION_META.get(
+        e, EMOTION_META['neutral'])['color']
+        for e in emos]
+    lights = [EMOTION_META.get(
+        e, EMOTION_META['neutral'])['light']
+        for e in emos]
+
+    with ca:
+        st.markdown("""
+        <div class="card-title">Emotion Frequency</div>
+        <div class="card-sub">
+            How often each emotion appeared
+        </div>
+        """, unsafe_allow_html=True)
+
+        fig = go.Figure(go.Bar(
+            x=emos, y=pcts,
+            marker=dict(
+                color=lights,
+                line=dict(color=colors, width=2)),
+            text=[f"{p:.0f}%" for p in pcts],
+            textposition='outside',
+            textfont=dict(
+                family='DM Sans', size=11,
+                color='#6B7280'),
+        ))
+        clean_layout(fig, 250)
+        fig.update_yaxes(
+            range=[0, max(pcts)*1.25],
+            title_text="% of readings")
+        st.plotly_chart(
+            fig, use_container_width=True,
+            config={'displayModeBar': False})
+
+    with cb:
+        st.markdown("""
+        <div class="card-title">
+            Emotion Composition
+        </div>
+        <div class="card-sub">
+            Share of total readings
+        </div>
+        """, unsafe_allow_html=True)
+
+        fig2 = go.Figure(go.Pie(
+            labels=[
+                f"{EMOTION_META.get(e,EMOTION_META['neutral'])['icon']} {e}"
+                for e in emos],
+            values=vals,
+            hole=0.52,
+            marker=dict(
+                colors=colors,
+                line=dict(color='white', width=3)),
+            textfont=dict(family='DM Sans', size=11),
+        ))
+        fig2.update_layout(
+            height=250,
+            margin=dict(l=0, r=0, t=20, b=0),
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(family='DM Sans', color='#6B7280'),
+            showlegend=True,
+            legend=dict(
+                font=dict(
+                    family='DM Sans',
+                    size=10, color='#6B7280'),
+                bgcolor='rgba(0,0,0,0)',
+            ),
+        )
+        st.plotly_chart(
+            fig2, use_container_width=True,
+            config={'displayModeBar': False})
+
+    # Per session bar
+    if len(sessions) >= 2:
+        st.markdown(
+            '<div class="divider"></div>',
+            unsafe_allow_html=True)
+        st.markdown("""
+        <div class="card-title">
+            Session-by-Session Breakdown
+        </div>
+        <div class="card-sub">
+            Dominant emotion and confidence per session
+        </div>
+        """, unsafe_allow_html=True)
+
+        xlabels, yconf, bcolors, icons = [], [], [], []
+        for i, s in enumerate(sessions):
+            de   = get_dominant(s['readings'])
+            meta = EMOTION_META.get(
+                de, EMOTION_META['neutral'])
+            xlabels.append(f"S{i+1}")
+            yconf.append(
+                get_avg_conf(s['readings'])*100)
+            bcolors.append(meta['color'])
+            icons.append(meta['icon'])
+
+        fig3 = go.Figure(go.Bar(
+            x=xlabels, y=yconf,
+            marker=dict(
+                color=bcolors,
+                line=dict(color='white', width=2),
+                opacity=0.85),
+            text=[f"{e}<br>{c:.0f}%"
+                  for e, c in zip(icons, yconf)],
+            textposition='outside',
+            textfont=dict(family='DM Sans', size=11),
+        ))
+        clean_layout(fig3, 210)
+        fig3.update_yaxes(
+            range=[0, 115],
+            title_text="Confidence %")
+        st.plotly_chart(
+            fig3, use_container_width=True,
+            config={'displayModeBar': False})
+
+    # Full trail
+    st.markdown(
+        '<div class="divider"></div>',
+        unsafe_allow_html=True)
+    st.markdown("""
+    <div class="card-title">Full Emotion Trail</div>
+    <div class="card-sub">
+        Every reading across all sessions
+    </div>
+    """, unsafe_allow_html=True)
+
+    dots = '<div class="dot-trail">'
+    for r in all_readings:
+        e      = r['emotion']
+        meta   = EMOTION_META.get(e, EMOTION_META['neutral'])
+        bg     = meta['light']
+        icon   = meta['icon']
+        conf   = r['confidence'] * 100
+        dots  += (
+            f'<div class="dot-e" '
+            f'style="background:{bg};" '
+            f'title="{e} — {conf:.0f}%">'
+            f'{icon}</div>')
+    dots += '</div>'
+    st.markdown(dots, unsafe_allow_html=True)
+
+    # Confidence wave
+    confs  = [r['confidence']*100 for r in all_readings]
+    ecols  = [EMOTION_META.get(
+        r['emotion'], EMOTION_META['neutral'])['color']
+        for r in all_readings]
+
+    fig4 = go.Figure()
+    fig4.add_trace(go.Scatter(
+        x=list(range(1, len(confs)+1)),
+        y=confs,
+        mode='lines+markers',
+        line=dict(color='#1C1C1E', width=1.5),
+        marker=dict(
+            size=6, color=ecols,
+            line=dict(color='white', width=1.5)),
+        fill='tozeroy',
+        fillcolor='rgba(28,28,30,0.05)',
+    ))
+    clean_layout(fig4, 180)
+    fig4.update_yaxes(
+        range=[0, 105], title_text="Confidence %")
+    fig4.update_xaxes(title_text="Reading #")
+    st.plotly_chart(
+        fig4, use_container_width=True,
+        config={'displayModeBar': False})
+
+
+# ══════════════════════════════════════════════════════════════
+# MODULE 4 — RECOMMENDATIONS
+# ══════════════════════════════════════════════════════════════
+elif st.session_state.active_module == 'recommendations':
+
+    st.markdown("""
+    <div class="page-hdr">
+        <div class="page-title">Recommendations</div>
+        <div class="page-sub">
+            Context-aware personalized suggestions
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    sessions = st.session_state.all_sessions
+    if not sessions:
+        st.markdown("""
+        <div class="card" style="text-align:center;
+             padding:3rem;">
+            <div style="font-size:3rem">🎯</div>
+            <div class="card-title"
+                 style="margin-top:1rem;">
+                No data yet
+            </div>
+            <div style="color:#9CA3AF;margin-top:0.5rem;">
+                Complete detection sessions first
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
+
+    # Selector
+    opts = ["All Sessions Combined"] + [
+        f"{s['label']} — {s['timestamp']}"
+        for s in sessions
+    ]
+    sel = st.selectbox(
+        "Analyze which session?", opts, index=0)
+
+    if sel == "All Sessions Combined":
+        target_sid = sessions[-1]['session_id']
+        all_r      = [r for s in sessions
+                      for r in s['readings']]
+        label      = "All Sessions Combined"
+    else:
+        idx        = opts.index(sel) - 1
+        target_sid = sessions[idx]['session_id']
+        all_r      = sessions[idx]['readings']
+        label      = sessions[idx]['label']
+
+    if not all_r:
+        st.warning("No readings in selected session.")
+        st.stop()
+
+    rec    = ContextAwareRecommender()
+    result = rec.analyze_context(target_sid)
+    ctx    = result.get('context', {})
+
+    dom    = get_dominant(all_r)
+    meta   = EMOTION_META.get(dom, EMOTION_META['neutral'])
+    avg_c  = get_avg_conf(all_r)
+    traj   = ctx.get('trajectory', 'stable')
+    recent = ctx.get('recent_emotion', dom)
+    r_meta = EMOTION_META.get(
+        recent, EMOTION_META['neutral'])
+
+    traj_color = {
+        'improving':'#10B981',
+        'declining':'#EF4444',
+        'stable':   '#6B7280'
+    }.get(traj, '#6B7280')
+    traj_icon = {
+        'improving':'📈','declining':'📉',
+        'stable':'➡️'}.get(traj,'➡️')
+
+    # Stat tiles
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f"""
+        <div class="stat-tile">
+            <div class="stat-tile-bar"
+                 style="background:{meta['color']}">
+            </div>
+            <div style="font-size:2rem">
+                {meta['icon']}
+            </div>
+            <div class="stat-val">{meta['text']}</div>
+            <div class="stat-lbl">Dominant Emotion</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div class="stat-tile">
+            <div class="stat-tile-bar"
+                 style="background:{r_meta['color']}">
+            </div>
+            <div style="font-size:2rem">
+                {r_meta['icon']}
+            </div>
+            <div class="stat-val">{r_meta['text']}</div>
+            <div class="stat-lbl">Recent Emotion</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""
+        <div class="stat-tile">
+            <div class="stat-tile-bar"
+                 style="background:{traj_color}">
+            </div>
+            <div style="font-size:2rem">
+                {traj_icon}
+            </div>
+            <div class="stat-val"
+                 style="font-size:1.7rem;">
+                {traj.capitalize()}
+            </div>
+            <div class="stat-lbl">Mood Trajectory</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="divider"></div>',
+        unsafe_allow_html=True)
+
+    # Summary
+    st.markdown(f"""
+    <div style="background:{meta['light']};
+         border:1px solid {meta['color']}30;
+         border-left:4px solid {meta['color']};
+         border-radius:14px;padding:1.2rem 1.5rem;
+         margin-bottom:1.2rem;">
+        <div style="font-family:'JetBrains Mono',
+             monospace;font-size:0.6rem;
+             color:{meta['color']};
+             letter-spacing:0.15em;
+             text-transform:uppercase;
+             margin-bottom:0.4rem;">
+            Analysis — {label}
+        </div>
+        <div style="font-family:'DM Sans',sans-serif;
+             font-size:0.95rem;color:#1C1C1E;
+             line-height:1.6;">
+            {result['summary']}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Reco cards
+    st.markdown("""
+    <div class="card-title">Personalized Suggestions</div>
+    <div class="card-sub">
+        Based on your emotional context
+    </div>
+    """, unsafe_allow_html=True)
+
+    T_COLORS = {
+        "music":"#8B5CF6","activity":"#10B981",
+        "content":"#3B82F6","wellbeing":"#F59E0B"}
+    T_ICONS  = {
+        "music":"🎵","activity":"🏃",
+        "content":"📺","wellbeing":"💚"}
+
+    recos = result.get('recommendations', [])
+    if recos:
+        rcols = st.columns(min(len(recos), 2))
+        for i, r in enumerate(recos):
+            rtype  = r['type']
+            color  = T_COLORS.get(rtype, '#1C1C1E')
+            icon   = T_ICONS.get(rtype, '💡')
+            items  = ''.join([
+                f'<div class="reco-item">{it}</div>'
+                for it in r['items']
+            ])
+            with rcols[i % 2]:
+                st.markdown(f"""
+                <div class="reco-card"
+                     style="border-left-color:{color}">
+                    <div class="reco-type"
+                         style="color:{color}">
+                        {icon} {rtype.upper()}
+                    </div>
+                    <div class="reco-title">
+                        {r['title']}
+                    </div>
+                    {items}
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.info(
+            "Not enough data for recommendations yet.")
+
+    # Download
+    st.markdown(
+        '<div class="divider"></div>',
+        unsafe_allow_html=True)
+
+    lines = [
+        f"EmoSense Report — {label}",
+        f"Generated: {datetime.datetime.now():%Y-%m-%d %H:%M}",
+        f"User: {st.session_state.user_name}",
+        "=" * 40,
+        f"Dominant : {meta['text']}",
+        f"Recent   : {r_meta['text']}",
+        f"Trend    : {traj.capitalize()}",
+        f"Readings : {len(all_r)}",
+        f"Conf     : {avg_c*100:.1f}%",
+        "=" * 40, "",
+        result['summary'], "",
+        "RECOMMENDATIONS:",
+    ]
+    for r in recos:
+        lines.append(
+            f"\n[{r['type'].upper()}] {r['title']}")
+        for item in r['items']:
+            lines.append(f"  • {item}")
+
+    st.download_button(
+        "⬇ Download Report",
+        "\n".join(lines),
+        file_name=(
+            f"emosense_{st.session_state.user_name}_"
+            f"{datetime.datetime.now():%Y%m%d_%H%M}.txt"),
+        mime="text/plain",
+        use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# MODULE 5 — ALL SESSIONS
+# ══════════════════════════════════════════════════════════════
+elif st.session_state.active_module == 'sessions':
+
+    st.markdown("""
+    <div class="page-hdr">
+        <div class="page-title">All Sessions</div>
+        <div class="page-sub">
+            Complete history of all recorded sessions
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    sessions = st.session_state.all_sessions
+    if not sessions:
+        st.markdown("""
+        <div class="card" style="text-align:center;
+             padding:3rem;">
+            <div style="font-size:3rem">📋</div>
+            <div class="card-title"
+                 style="margin-top:1rem;">
+                No sessions recorded
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
+
+    for i, sess in enumerate(sessions):
+        dom   = get_dominant(sess['readings'])
+        meta  = EMOTION_META.get(
+            dom, EMOTION_META['neutral'])
+        reads = sess['readings']
+        avg_c = get_avg_conf(reads)
+        cnts  = Counter(r['emotion'] for r in reads)
+
+        with st.expander(
+                f"Session {i+1}  ·  "
+                f"{meta['icon']} {meta['text']}  ·  "
+                f"{sess['timestamp']}  ·  "
+                f"{len(reads)} readings",
+                expanded=(i == len(sessions)-1)):
+
+            ca, cb = st.columns([1, 1.4])
+
+            with ca:
+                st.markdown(f"""
+                <div class="stat-tile"
+                     style="margin-bottom:1rem;">
+                    <div class="stat-tile-bar"
+                         style="background:{meta['color']}">
+                    </div>
+                    <div style="display:flex;
+                         align-items:center;gap:0.8rem;">
+                        <div style="font-size:2rem">
+                            {meta['icon']}
+                        </div>
+                        <div>
+                            <div class="stat-val"
+                                 style="font-size:1.5rem">
+                                {meta['text']}
+                            </div>
+                            <div class="stat-lbl">
+                                Dominant
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                sm1, sm2 = st.columns(2)
+                with sm1:
+                    st.metric("Readings", len(reads))
+                with sm2:
+                    st.metric(
+                        "Confidence",
+                        f"{avg_c*100:.1f}%")
+
+                st.markdown("""
+                <div class="card-sub"
+                     style="margin-top:1rem;">
+                    Emotion Breakdown
+                </div>
+                """, unsafe_allow_html=True)
+
+                for emo, cnt in cnts.most_common():
+                    m   = EMOTION_META.get(
+                        emo, EMOTION_META['neutral'])
+                    pct = cnt / len(reads) * 100
+                    st.markdown(f"""
+                    <div style="display:flex;
+                         align-items:center;
+                         gap:0.7rem;padding:0.35rem 0;
+                         border-bottom:1px solid #F3F4F6;">
+                        <span>{m['icon']}</span>
+                        <span style="flex:1;
+                             font-size:0.83rem;
+                             color:#1C1C1E;">
+                            {m['text']}
+                        </span>
+                        <div style="width:70px;
+                             background:#F3F4F6;
+                             border-radius:50px;
+                             height:5px;">
+                            <div style="width:{pct}%;
+                                 height:100%;
+                                 background:{m['color']};
+                                 border-radius:50px;">
+                            </div>
+                        </div>
+                        <span style="font-family:
+                             'JetBrains Mono',monospace;
+                             font-size:0.65rem;
+                             color:#9CA3AF;
+                             width:2.2rem;text-align:right;">
+                            {pct:.0f}%
+                        </span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            with cb:
+                confs  = [r['confidence']*100
+                          for r in reads]
+                ecols  = [EMOTION_META.get(
+                    r['emotion'],
+                    EMOTION_META['neutral'])['color']
+                    for r in reads]
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=list(range(1, len(confs)+1)),
+                    y=confs,
+                    mode='lines+markers',
+                    line=dict(
+                        color=meta['color'], width=2),
+                    marker=dict(
+                        size=7, color=ecols,
+                        line=dict(
+                            color='white', width=1.5)),
+                    fill='tozeroy',
+                    fillcolor=f"{meta['color']}15",
+                ))
+                clean_layout(fig, 200)
+                fig.update_yaxes(
+                    range=[0,105],
+                    title_text="Confidence %")
+                fig.update_xaxes(
+                    title_text="Reading #")
+                st.plotly_chart(
+                    fig, use_container_width=True,
+                    config={'displayModeBar': False})
+
+                st.markdown("""
+                <div class="card-sub">Emotion Trail</div>
+                """, unsafe_allow_html=True)
+                dots = '<div class="dot-trail">'
+                for r in reads:
+                    m    = EMOTION_META.get(
+                        r['emotion'],
+                        EMOTION_META['neutral'])
+                    c    = r['confidence'] * 100
+                    bg   = m['light']
+                    ico  = m['icon']
+                    emo  = r['emotion']
+                    dots += (
+                        f'<div class="dot-e" '
+                        f'style="background:{bg}" '
+                        f'title="{emo} {c:.0f}%">'
+                        f'{ico}</div>')
+                dots += '</div>'
+                st.markdown(dots, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# MODULE 6 — SETTINGS
+# ══════════════════════════════════════════════════════════════
+elif st.session_state.active_module == 'settings':
+
+    st.markdown("""
+    <div class="page-hdr">
+        <div class="page-title">Settings</div>
+        <div class="page-sub">
+            System configuration and information
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown("""
+        <div class="card-title">System Info</div>
+        <div class="card-sub">Model performance</div>
+        """, unsafe_allow_html=True)
+
+        for label, val, sub in [
+            ("Face Model","EfficientNet-B3",
+             "69.98% accuracy"),
+            ("Audio Model","Wav2Vec2 + BiLSTM",
+             "92.36% accuracy"),
+            ("Fusion Method","Late Fusion",
+             "Confidence-weighted"),
+            ("Detection Interval","1.5 seconds",
+             "Per reading"),
+            ("Session Duration","30 seconds",
+             "Per session"),
+            ("Storage","SQLite",
+             "Local database"),
+        ]:
+            st.markdown(f"""
+            <div style="display:flex;
+                 justify-content:space-between;
+                 align-items:center;
+                 padding:0.75rem 0;
+                 border-bottom:1px solid #F3F4F6;">
+                <div>
+                    <div style="font-family:'DM Sans',
+                         sans-serif;font-weight:500;
+                         font-size:0.86rem;color:#1C1C1E;">
+                        {label}
+                    </div>
+                    <div style="font-family:'JetBrains Mono',
+                         monospace;font-size:0.6rem;
+                         color:#9CA3AF;margin-top:0.1rem;">
+                        {sub}
+                    </div>
+                </div>
+                <div style="font-family:'JetBrains Mono',
+                     monospace;font-size:0.75rem;
+                     color:#1C1C1E;font-weight:500;">
+                    {val}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with c2:
+        st.markdown("""
+        <div class="card-title">Current User</div>
+        <div class="card-sub">Session information</div>
+        """, unsafe_allow_html=True)
+
+        sessions = st.session_state.all_sessions
+        st.markdown(f"""
+        <div style="padding:0.5rem 0 1rem 0;">
+            <div style="font-family:'DM Sans',sans-serif;
+                 font-size:0.8rem;color:#9CA3AF;
+                 margin-bottom:0.2rem;">Name</div>
+            <div style="font-family:'DM Serif Display',
+                 serif;font-size:1.6rem;color:#1C1C1E;">
+                {st.session_state.user_name}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        s1, s2 = st.columns(2)
+        with s1:
+            st.metric("Sessions", len(sessions))
+        with s2:
+            st.metric("Total Readings", sum(
+                len(s['readings']) for s in sessions))
+
+        st.markdown(
+            '<div style="height:0.8rem"></div>',
+            unsafe_allow_html=True)
+
+        if sessions:
+            if st.button(
+                    "🗑 Clear All Sessions",
+                    use_container_width=True):
+                st.session_state.all_sessions  = []
+                st.session_state.current_session = None
+                st.success("Cleared.")
+                st.rerun()
+
+        if st.button(
+                "↩ Switch User",
+                use_container_width=True):
+            for k in defaults:
+                st.session_state[k] = defaults[k]
+            st.rerun()
+
+        st.markdown(
+            '<div class="divider"></div>',
+            unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="card-title">How to Use</div>
+        """, unsafe_allow_html=True)
+
+        for num, title, desc in [
+            ("1","Detection",
+             "Record a 30-second session"),
+            ("2","Repeat",
+             "Record multiple sessions over time"),
+            ("3","Analytics",
+             "View patterns across sessions"),
+            ("4","Recommendations",
+             "Get personalized AI suggestions"),
+        ]:
+            st.markdown(f"""
+            <div style="display:flex;gap:1rem;
+                 padding:0.55rem 0;
+                 border-bottom:1px solid #F3F4F6;">
+                <div style="font-family:'DM Serif Display',
+                     serif;font-size:1.4rem;
+                     color:#D1D5DB;width:1.3rem;">
+                    {num}
+                </div>
+                <div>
+                    <div style="font-family:'DM Sans',
+                         sans-serif;font-weight:600;
+                         font-size:0.86rem;color:#1C1C1E;">
+                        {title}
+                    </div>
+                    <div style="font-size:0.76rem;
+                         color:#9CA3AF;margin-top:0.1rem;">
+                        {desc}
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
