@@ -98,7 +98,7 @@ def generate_with_groq(system_prompt: str, user_prompt: str) -> str:
     local Ollama but ~10x faster and works on Streamlit Cloud.
     """
     client    = get_groq_client()
-    llm_model = os.getenv("LLM_MODEL", "llama3-8b-8192")
+    llm_llm_model = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 
     response = client.chat.completions.create(
         model=llm_model,
@@ -203,7 +203,7 @@ Additional rules:
         f"Generate the code snippet:"
     )
 
-    llm_model = os.getenv("LLM_MODEL", "llama3-8b-8192")
+    llm_model = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
     _log(f"🧠 Step 3/5 — Generating with Groq ({llm_model})...")
     max_retries = 3
     snippet     = ""
