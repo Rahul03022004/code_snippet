@@ -1,19 +1,18 @@
 # backend/agents/snippet_agent.py
 import os
-import requests
 import chromadb
+import streamlit as st
+from chromadb.config import Settings
+from groq import Groq
 from dotenv import load_dotenv
 from backend.validators.ast_validator import validate_syntax
 
 load_dotenv()
 
-chroma_client = chromadb.PersistentClient(path="./chroma_store")
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-OLLAMA_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-LLM_MODEL   = os.getenv("LLM_MODEL",   "llama3.1")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+# NOTE: Models read inside functions so sidebar changes take effect immediately.
 
-# ── Framework-Specific Prompts ───────────────────────────────
 FRAMEWORK_TEMPLATES = {
     "nextjs": """You are a Next.js 14 App Router expert.
 Rules:
@@ -64,42 +63,58 @@ OUTPUT: raw code only. No markdown. No explanation."""
 }
 
 
+@st.cache_resource
+def get_chroma_client():
+    """Cached ChromaDB client — created once per session."""
+    return chromadb.PersistentClient(
+        path="./chroma_store",
+        settings=Settings(anonymized_telemetry=False)
+    )
+
+
+@st.cache_resource
+def get_groq_client():
+    """
+    WHY: Cached Groq client — created once per session.
+    Groq replaces Ollama for cloud deployment: free tier,
+    extremely fast inference, no local server required.
+    """
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY not set. Add it to .env or Streamlit secrets.")
+    return Groq(api_key=api_key)
+
+
 def get_embedding(text: str) -> list:
-    r = requests.post(
-        f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text}
-    )
-    return r.json()["embedding"]
+    """Uses the cached sentence-transformer model from repo_loader."""
+    from backend.rag.repo_loader import get_embed_model
+    model = get_embed_model()
+    return model.encode(text).tolist()
 
 
-def generate_with_ollama(system_prompt: str, user_prompt: str) -> str:
+def generate_with_groq(system_prompt: str, user_prompt: str) -> str:
     """
-    WHY: Local Ollama call — zero cost, zero network latency,
-    temperature=0.3 for consistent/deterministic code output.
+    WHY: Groq runs llama3 on their cloud hardware — same model as
+    local Ollama but ~10x faster and works on Streamlit Cloud.
     """
-    r = requests.post(
-        f"{OLLAMA_URL}/api/chat",
-        json={
-            "model":   LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt}
-            ],
-            "stream":  False,
-            "options": {"temperature": 0.3, "num_predict": 800}
-        },
-        timeout=120
+    client    = get_groq_client()
+    llm_model = os.getenv("LLM_MODEL", "llama3-8b-8192")
+
+    response = client.chat.completions.create(
+        model=llm_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt}
+        ],
+        temperature=0.3,
+        max_tokens=800,
     )
-    return r.json()["message"]["content"].strip()
+    return response.choices[0].message.content.strip()
 
 
 def retrieve_context(intent: str, repo_id: str) -> str:
-    """
-    WHY: Grounding generation in the actual codebase prevents
-    hallucination of project-specific patterns and ensures
-    the output matches the team's existing coding style.
-    """
     try:
+        chroma_client   = get_chroma_client()
         collection      = chroma_client.get_collection(f"repo_{repo_id}")
         query_embedding = get_embedding(intent)
         results         = collection.query(query_embeddings=[query_embedding], n_results=3)
@@ -109,15 +124,11 @@ def retrieve_context(intent: str, repo_id: str) -> str:
         return "\n\n---\n\n".join(f"// From: {f}\n{c}" for f, c in zip(files, docs))
 
     except Exception as e:
+        print(f"[retrieve_context] RAG failed for repo_id={repo_id}: {e}")
         return ""
 
 
 def check_code_smells(code: str) -> list:
-    """
-    WHY: Paper detected smells in existing code but never
-    checked its own generated output. We close this gap by
-    validating before delivery.
-    """
     smells = []
     lines  = code.split('\n')
 
@@ -139,7 +150,6 @@ def check_code_smells(code: str) -> list:
 
 
 def score_snippet(snippet: str, smells: list, has_context: bool, is_valid: bool) -> dict:
-    """4-axis quality score — 25pts each = 100 total"""
     scores = {
         "Syntax Valid":    25 if is_valid else 0,
         "Smell Free":      max(0, 25 - len(smells) * 5),
@@ -154,49 +164,31 @@ def score_snippet(snippet: str, smells: list, has_context: bool, is_valid: bool)
 
 
 def clean_output(text: str) -> str:
-    """Strip markdown fences Llama sometimes adds despite instructions"""
     lines = text.split('\n')
     return '\n'.join(l for l in lines if not l.strip().startswith("```")).strip()
 
 
 def generate_smell_fix(snippet: str, smells: list) -> str:
-    """
-    WHY: Paper stopped at smell detection. We auto-generate
-    a refactored version — closing the remediation gap.
-    """
     if not smells:
         return None
-    return generate_with_ollama(
+    return generate_with_groq(
         system_prompt="You are a refactoring expert. Fix ONLY the listed smells. Keep logic identical. Raw code only.",
         user_prompt=f"Smells: {', '.join(smells)}\n\nCode:\n{snippet}\n\nRefactored:"
     )
 
 
 def generate_snippet(intent: str, framework: str, repo_id: str, log=None) -> dict:
-    """
-    Full 6-step agent pipeline:
-    1. RAG retrieval  → codebase context
-    2. Prompt build   → framework-aware
-    3. Generate       → Ollama llama3.1
-    4. AST validate   → syntax check + retry
-    5. Smell check    → output quality
-    6. Score + return → enriched result
-    """
     def _log(msg):
-        if log:
-            log(msg)
+        if log: log(msg)
 
-    # ── Step 1 ───────────────────────────────────────────────
     _log("🔍 Step 1/5 — Retrieving codebase context via RAG...")
     context     = retrieve_context(intent, repo_id)
     has_context = len(context) > 0
     _log(f"   Context found: {'✅ Yes' if has_context else '⚠️ No (using best practices)'}")
 
-    # ── Step 2 ───────────────────────────────────────────────
     _log("📝 Step 2/5 — Building framework-aware prompt...")
     fw_instruction = FRAMEWORK_TEMPLATES.get(framework, FRAMEWORK_TEMPLATES["unknown"])
-
-    system_prompt = f"""{fw_instruction}
+    system_prompt  = f"""{fw_instruction}
 Additional rules:
 - Match the coding style from the context snippets
 - Functions under 40 lines
@@ -211,14 +203,14 @@ Additional rules:
         f"Generate the code snippet:"
     )
 
-    # ── Step 3 + 4 ───────────────────────────────────────────
-    _log(f"🧠 Step 3/5 — Generating with Ollama ({LLM_MODEL})...")
+    llm_model = os.getenv("LLM_MODEL", "llama3-8b-8192")
+    _log(f"🧠 Step 3/5 — Generating with Groq ({llm_model})...")
     max_retries = 3
     snippet     = ""
     is_valid    = False
 
     for attempt in range(max_retries):
-        raw     = generate_with_ollama(system_prompt, user_prompt)
+        raw     = generate_with_groq(system_prompt, user_prompt)
         snippet = clean_output(raw)
 
         _log(f"✅ Step 4/5 — AST validation (attempt {attempt+1}/{max_retries})...")
@@ -231,7 +223,6 @@ Additional rules:
             _log(f"   Syntax: ❌ {error} — retrying...")
             user_prompt += f"\n\nPrevious attempt had this error: {error}\nFix and regenerate:"
 
-    # ── Step 5 ───────────────────────────────────────────────
     _log("🔎 Step 5/5 — Checking for code smells...")
     smells = check_code_smells(snippet)
     _log(f"   Smells: {smells if smells else '✅ None'}")
