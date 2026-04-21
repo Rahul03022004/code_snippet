@@ -1,0 +1,7 @@
+# .gitignore
+.env
+.streamlit/secrets.toml
+chroma_store/
+temp_repos/
+__pycache__/
+*.pyc

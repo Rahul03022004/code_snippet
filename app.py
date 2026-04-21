@@ -3,6 +3,9 @@ import streamlit as st
 import streamlit.components.v1 as components
 import os
 
+# Key is loaded from Streamlit secrets or .env — never hardcode here
+if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
+    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 st.set_page_config(
     page_title="Code Snippet Agent",
     page_icon=None,
@@ -840,7 +843,7 @@ def render_scores(score, smells, syntax_valid, context_used, framework):
 # ════════════════════════════════════════════════════════════
 with st.sidebar:
     # Hidden selectboxes for config (controlled via sidebar HTML)
-    llm_model   = st.selectbox("LLM",   ["llama3.1","llama3.2","llama3.2:1b","codellama","mistral"],   label_visibility="collapsed")
+    llm_model = st.selectbox("LLM", ["llama3-8b-8192","llama3-70b-8192","mixtral-8x7b-32768","gemma2-9b-it"],   label_visibility="collapsed")
     embed_model = st.selectbox("Embed", ["nomic-embed-text","mxbai-embed-large"],                       label_visibility="collapsed")
     os.environ["LLM_MODEL"]   = llm_model
     os.environ["EMBED_MODEL"] = embed_model
